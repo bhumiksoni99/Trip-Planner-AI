@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm --version)",
+      "Bash(npx --yes create-next-app@latest frontend --ts --app --tailwind --eslint --src-dir --import-alias \"@/*\" --use-npm --disable-git --yes)",
+      "Bash(node -e 'const p=require\\(\"./package.json\"\\);console.log\\(JSON.stringify\\({scripts:p.scripts,dependencies:p.dependencies,devDependencies:p.devDependencies},null,2\\)\\)')",
+      "Bash(python3 -m py_compile app.py)",
+      "Bash(.venv/bin/python -m py_compile app.py)",
+      "Bash(.venv/bin/uvicorn app:app --reload --port 8000)",
+      "Bash(node -e 'const p=require\\(\"./package.json\"\\);console.log\\(p.dependencies\\)')",
+      "Bash(curl -s --retry 15 --retry-connrefused --retry-delay 1 http://127.0.0.1:8000/health)",
+      "Read(//Applications/Google Chrome.app/Contents/MacOS/**)",
+      "Read(//Applications/**)",
+      "Bash(lsof -iTCP:3000 -iTCP:8000 -sTCP:LISTEN)",
+      "Read(//Users/bhumiksoni/Library/Caches/ms-playwright/**)",
+      "Bash(lsof -iTCP:8000 -sTCP:LISTEN -n -P)",
+      "Bash(\"/Users/bhumiksoni/Personal/Travel Planner/.venv/bin/python\" mock_backend.py)",
+      "Bash(npm init *)",
+      "Bash(node check_hydration.mjs http://localhost:3000 http://127.0.0.1:3000)",
+      "Bash(../.venv/bin/python -c \"import app; print\\('app imports OK'\\)\")",
+      "Bash(docker --version)",
+      "Bash(docker info *)",
+      "Bash(node -e 'console.log\\(require\\(\"eslint-plugin-react-hooks/package.json\"\\).version\\)')",
+      "Bash(node -e 'const p=require\\(\"eslint-plugin-react-hooks\"\\); const c=p.configs[\"recommended-latest\"]||p.configs.recommended||p.configs.flat?.recommended; console.log\\(Object.keys\\(\\(c&&c.rules\\)||{}\\).join\\(\"\\\\n\"\\)\\)')",
+      "Bash(echo \"tsc exit: $?\")",
+      "Bash(mkdir -p shots)",
+      "Bash(curl -s -o /dev/null -m 5 -w \"dev server: %{http_code}\\\\n\" http://localhost:3000/)",
+      "Bash(node check_chat_ui.mjs)",
+      "Bash(sed -i '' 's/Plan a complete 7 days Japan/Plan a complete 7 days Japan/' check_chat_ui.mjs)"
+    ]
+  }
+}
