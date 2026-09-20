@@ -26,7 +26,20 @@
       "Bash(mkdir -p shots)",
       "Bash(curl -s -o /dev/null -m 5 -w \"dev server: %{http_code}\\\\n\" http://localhost:3000/)",
       "Bash(node check_chat_ui.mjs)",
-      "Bash(sed -i '' 's/Plan a complete 7 days Japan/Plan a complete 7 days Japan/' check_chat_ui.mjs)"
+      "Bash(sed -i '' 's/Plan a complete 7 days Japan/Plan a complete 7 days Japan/' check_chat_ui.mjs)",
+      "Bash(\"/Users/bhumiksoni/Personal/Travel Planner/.venv/bin/pip\" list)",
+      "Bash(\"/Users/bhumiksoni/Personal/Travel Planner/.venv/bin/python\" -m pip install -q langchain-mcp-adapters)",
+      "Bash(\"/Users/bhumiksoni/Personal/Travel Planner/.venv/bin/python\" -m pip list)",
+      "Bash(VIRTUAL_ENV=.venv uv pip install langchain-mcp-adapters)",
+      "Bash(VIRTUAL_ENV=.venv uv pip list)",
+      "Bash(\"/Users/bhumiksoni/Personal/Travel Planner/.venv/bin/python\" -)",
+      "Bash(\"/Users/bhumiksoni/Personal/Travel Planner/.venv/bin/python\" mcp_client_test.py)",
+      "Bash('/Users/bhumiksoni/Personal/Travel Planner/.venv/bin/python' -c ' *)",
+      "Bash(mv backend.py agent.py)",
+      "Bash(rm -rf __pycache__)",
+      "Bash(\"/Users/bhumiksoni/Personal/Travel Planner/.venv/bin/python\" -m py_compile mcp_client.py)",
+      "Bash(timeout 240 '/Users/bhumiksoni/Personal/Travel Planner/.venv/bin/python' -c ' *)",
+      "Bash(\"/Users/bhumiksoni/Personal/Travel Planner/.venv/bin/python\" -m py_compile agent.py)"
     ]
   }
 }
