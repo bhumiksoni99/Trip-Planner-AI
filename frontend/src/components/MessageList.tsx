@@ -11,9 +11,19 @@ type MessageListProps = {
   pending: boolean;
   onRetry: () => void;
   onDownload: (content: string) => void;
+  awaitingApproval: boolean;
+  onApprove: () => void;
 };
 
-export default function MessageList({ threadId, messages, pending, onRetry, onDownload }: MessageListProps) {
+export default function MessageList({
+  threadId,
+  messages,
+  pending,
+  onRetry,
+  onDownload,
+  awaitingApproval,
+  onApprove,
+}: MessageListProps) {
   const lastMessageRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
 
@@ -44,6 +54,7 @@ export default function MessageList({ threadId, messages, pending, onRetry, onDo
       })}
 
       {pending && <ThinkingMessage />}
+      {awaitingApproval && !pending && <ApprovalCard onApprove={onApprove} />}
       <div ref={endRef} />
     </div>
   );
@@ -101,6 +112,28 @@ function ErrorMessage({ content, onRetry }: { content: string; onRetry?: () => v
             Try again
           </button>
         )}
+      </div>
+    </div>
+  );
+}
+
+function ApprovalCard({ onApprove }: { onApprove: () => void }) {
+  return (
+    <div className="flex gap-3 sm:gap-4">
+      <span aria-hidden className="size-8 shrink-0" />
+      <div className="min-w-0 flex-1 rounded-2xl border border-line bg-surface px-4 py-3">
+        <p className="text-sm font-medium text-ink">Happy with this plan?</p>
+        <p className="mt-0.5 text-sm text-muted">
+          Approve it and I&apos;ll write up the full travel plan with flights, hotels and tips.
+        </p>
+        <button
+          type="button"
+          onClick={onApprove}
+          className="mt-3 inline-flex items-center gap-2 rounded-full bg-accent px-4 py-2 text-sm font-medium text-white transition hover:-translate-y-px"
+        >
+          <CheckIcon className="size-4" />
+          Approve plan
+        </button>
       </div>
     </div>
   );

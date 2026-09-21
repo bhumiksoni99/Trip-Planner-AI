@@ -39,7 +39,8 @@
       "Bash(rm -rf __pycache__)",
       "Bash(\"/Users/bhumiksoni/Personal/Travel Planner/.venv/bin/python\" -m py_compile mcp_client.py)",
       "Bash(timeout 240 '/Users/bhumiksoni/Personal/Travel Planner/.venv/bin/python' -c ' *)",
-      "Bash(\"/Users/bhumiksoni/Personal/Travel Planner/.venv/bin/python\" -m py_compile agent.py)"
+      "Bash(\"/Users/bhumiksoni/Personal/Travel Planner/.venv/bin/python\" -m py_compile agent.py)",
+      "Bash(node check_approval.mjs)"
     ]
   }
 }

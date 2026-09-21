@@ -1,6 +1,7 @@
 import os
 import sys
 import asyncio
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from dotenv import load_dotenv
@@ -11,6 +12,8 @@ load_dotenv()
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 AVIATIONSTACK_API_KEY = os.getenv("AVIATIONSTACK_API_KEY")
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
+
+logger = logging.getLogger("travel.mcp")
 
 # Absolute path, so the server starts whatever directory the app runs from
 WEATHER_SERVER = str(Path(__file__).parent / "custom_weather_mcp.py")
@@ -71,6 +74,10 @@ async def load_mcp_tools():
     search_tool = search
     aviation_tools = {tool.name: tool for tool in aviation}
     weather_tools = {tool.name: tool for tool in weather}
+    logger.info(
+        "loaded tools | tavily=%s aviationstack=%s weather=%s",
+        len(tavily_tools), len(aviation_tools), len(weather_tools),
+    )
     return search_tool, aviation_tools, weather_tools
 
 
@@ -93,6 +100,7 @@ def run_sync(coro):
 
 async def tavily_search(query: str, max_results: int = 5) -> str:
     tool, _, _ = await load_mcp_tools()
+    logger.info("tavily_search | query=%r max_results=%s", query, max_results)
     content = await tool.ainvoke({"query": query, "max_results": max_results})
 
     # The tool answers with a list of content blocks; the search results are the text ones
@@ -109,6 +117,7 @@ async def get_flights(dep_iata: str, arr_iata: str, airline_iata: str = "", limi
     if tool is None:
         raise RuntimeError(f"list_routes is not on the server. Available tools: {', '.join(tools)}")
 
+    logger.info("list_routes | %s -> %s limit=%s", dep_iata.upper(), arr_iata.upper(), limit)
     content = await tool.ainvoke({
         "dep_iata": dep_iata.upper(),
         "arr_iata": arr_iata.upper(),
@@ -124,6 +133,7 @@ async def get_weather(city: str, forecast_days: int = 5) -> str:
     """Current weather and the days ahead for a city, e.g. get_weather("Barcelona")."""
     _, _, tools = await load_mcp_tools()
 
+    logger.info("weather | city=%s forecast_days=%s", city, forecast_days)
     current = await tools["get_weather"].ainvoke({"city": city})
     forecast = await tools["get_forecast"].ainvoke({"city": city, "days": forecast_days})
 

@@ -4,7 +4,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import uvicorn
 import traceback
-from backend import run_travel_agent
+from agent import run_travel_agent, resume_travel_agent
 
 app = FastAPI(title="Travel Agent",description="Langgraph FastAPI app", version="1.0.0")
 
@@ -13,6 +13,11 @@ load_dotenv()
 class TravelRequest(BaseModel):
     message:str
     thread_id: str | None = None
+
+class ApprovalRequest(BaseModel):
+    thread_id: str
+    approved: bool = True
+    feedback: str = ""
 
 @app.get('/health')
 async def health_check():
@@ -44,6 +49,25 @@ async def get_itinerary(request: TravelRequest):
         return JSONResponse(status_code=500,content={
             "success": False,
             "error": "Something went wrong while planning your trip. Please try again."
+        })
+
+
+@app.post('/api/travel/resume')
+async def resume_itinerary(request: ApprovalRequest):
+    """Answer the approval question a paused run is waiting on, and return the finished plan."""
+    try:
+        answer = resume_travel_agent(request.thread_id, request.approved, request.feedback)
+
+        return JSONResponse(status_code=200,content = {
+            "success":True,
+            "data":answer
+        })
+
+    except Exception:
+        traceback.print_exc()
+        return JSONResponse(status_code=500,content={
+            "success": False,
+            "error": "Something went wrong while finishing your trip plan. Please try again."
         })
 
 
