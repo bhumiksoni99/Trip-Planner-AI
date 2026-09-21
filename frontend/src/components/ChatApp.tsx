@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { flushSync } from "react-dom";
-import { requestPlan, resumePlan, type ApprovalRequest } from "@/lib/api";
+import { requestPlan, resumePlan, type ApprovalRequest, type PlanResponse } from "@/lib/api";
 import { addMessage, createThread, deleteThread, removeLastMessage, useThreads } from "@/lib/threads";
 import Composer from "./Composer";
 import EmptyState from "./EmptyState";
@@ -44,22 +44,24 @@ export default function ChatApp() {
     });
   }
 
+  // A paused run shows its draft plus the approval card; a finished one shows the plan
+  function applyResult(threadId: string, result: PlanResponse) {
+    if (result.awaiting_approval && result.approval_request) {
+      const { itinerary, budget } = result.approval_request;
+      addMessage(threadId, {
+        role: "assistant",
+        content: [itinerary, budget].filter(Boolean).join("\n\n") || "Here is the plan so far.",
+      });
+      setApproval(threadId, result.approval_request);
+    } else {
+      addMessage(threadId, { role: "assistant", content: result.final_response });
+    }
+  }
+
   async function ask(threadId: string, text: string) {
     setPending(threadId, true);
     try {
-      const result = await requestPlan(text, threadId);
-
-      // The backend paused for approval: show the draft, and wait for the Approve button
-      if (result.awaiting_approval && result.approval_request) {
-        const { itinerary, budget } = result.approval_request;
-        addMessage(threadId, {
-          role: "assistant",
-          content: [itinerary, budget].filter(Boolean).join("\n\n") || "Here is the plan so far.",
-        });
-        setApproval(threadId, result.approval_request);
-      } else {
-        addMessage(threadId, { role: "assistant", content: result.final_response });
-      }
+      applyResult(threadId, await requestPlan(text, threadId));
     } catch (err) {
       const message = err instanceof Error ? err.message : "Something went wrong. Please try again.";
       addMessage(threadId, { role: "assistant", content: message, error: true });
@@ -68,18 +70,22 @@ export default function ChatApp() {
     }
   }
 
-  async function approve(threadId: string) {
+  async function answerApproval(threadId: string, approved: boolean, feedback = "") {
     setApproval(threadId, null);
     setPending(threadId, true);
     try {
-      const result = await resumePlan(threadId, true);
-      addMessage(threadId, { role: "assistant", content: result.final_response });
+      applyResult(threadId, await resumePlan(threadId, approved, feedback));
     } catch (err) {
       const message = err instanceof Error ? err.message : "Something went wrong. Please try again.";
       addMessage(threadId, { role: "assistant", content: message, error: true });
     } finally {
       setPending(threadId, false);
     }
+  }
+
+  function requestChanges(threadId: string, feedback: string) {
+    addMessage(threadId, { role: "user", content: feedback });
+    void answerApproval(threadId, false, feedback);
   }
 
   function send(text: string) {
@@ -192,7 +198,8 @@ export default function ChatApp() {
                 onRetry={retry}
                 onDownload={downloadPdf}
                 awaitingApproval={Boolean(approvals[activeThread.id])}
-                onApprove={() => approve(activeThread.id)}
+                onApprove={() => void answerApproval(activeThread.id, true)}
+                onRequestChanges={(feedback) => requestChanges(activeThread.id, feedback)}
               />
             ) : (
               <EmptyState onPick={send} />

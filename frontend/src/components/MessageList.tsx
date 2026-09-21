@@ -13,6 +13,7 @@ type MessageListProps = {
   onDownload: (content: string) => void;
   awaitingApproval: boolean;
   onApprove: () => void;
+  onRequestChanges: (feedback: string) => void;
 };
 
 export default function MessageList({
@@ -23,18 +24,19 @@ export default function MessageList({
   onDownload,
   awaitingApproval,
   onApprove,
+  onRequestChanges,
 }: MessageListProps) {
   const lastMessageRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
 
-  // While waiting, keep the thinking indicator in view; otherwise show the start of the latest message
+  // Keep the thinking indicator or approval card in view; otherwise show the start of the latest message
   useEffect(() => {
-    if (pending) {
+    if (pending || awaitingApproval) {
       endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
     } else {
       lastMessageRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
     }
-  }, [threadId, messages.length, pending]);
+  }, [threadId, messages.length, pending, awaitingApproval]);
 
   return (
     <div className="mx-auto w-full max-w-3xl space-y-8 px-4 pt-6 pb-10 sm:px-6">
@@ -54,7 +56,9 @@ export default function MessageList({
       })}
 
       {pending && <ThinkingMessage />}
-      {awaitingApproval && !pending && <ApprovalCard onApprove={onApprove} />}
+      {awaitingApproval && !pending && (
+        <ApprovalCard onApprove={onApprove} onRequestChanges={onRequestChanges} />
+      )}
       <div ref={endRef} />
     </div>
   );
@@ -117,23 +121,68 @@ function ErrorMessage({ content, onRetry }: { content: string; onRetry?: () => v
   );
 }
 
-function ApprovalCard({ onApprove }: { onApprove: () => void }) {
+function ApprovalCard({
+  onApprove,
+  onRequestChanges,
+}: {
+  onApprove: () => void;
+  onRequestChanges: (feedback: string) => void;
+}) {
+  const [feedback, setFeedback] = useState("");
+
+  function submitChanges() {
+    const trimmed = feedback.trim();
+    if (!trimmed) return;
+    setFeedback("");
+    onRequestChanges(trimmed);
+  }
+
   return (
     <div className="flex gap-3 sm:gap-4">
       <span aria-hidden className="size-8 shrink-0" />
       <div className="min-w-0 flex-1 rounded-2xl border border-line bg-surface px-4 py-3">
         <p className="text-sm font-medium text-ink">Happy with this plan?</p>
         <p className="mt-0.5 text-sm text-muted">
-          Approve it and I&apos;ll write up the full travel plan with flights, hotels and tips.
+          Approve it for the full write-up, or say what you&apos;d like changed and I&apos;ll plan it again.
         </p>
-        <button
-          type="button"
-          onClick={onApprove}
-          className="mt-3 inline-flex items-center gap-2 rounded-full bg-accent px-4 py-2 text-sm font-medium text-white transition hover:-translate-y-px"
-        >
-          <CheckIcon className="size-4" />
-          Approve plan
-        </button>
+
+        <label htmlFor="plan-feedback" className="sr-only">
+          What would you like changed?
+        </label>
+        <textarea
+          id="plan-feedback"
+          rows={2}
+          value={feedback}
+          onChange={(event) => setFeedback(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+              event.preventDefault();
+              submitChanges();
+            }
+          }}
+          placeholder="What would you like changed? e.g. cheaper hotels, more time in the old town"
+          className="mt-3 block w-full resize-none rounded-xl border border-line bg-surface-strong px-3 py-2 text-sm text-ink placeholder:text-muted/70 focus:border-accent/50 focus:outline-none"
+        />
+
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={onApprove}
+            className="inline-flex items-center gap-2 rounded-full bg-accent px-4 py-2 text-sm font-medium text-white transition hover:-translate-y-px"
+          >
+            <CheckIcon className="size-4" />
+            Approve plan
+          </button>
+          <button
+            type="button"
+            onClick={submitChanges}
+            disabled={!feedback.trim()}
+            className="inline-flex items-center gap-2 rounded-full border border-line bg-surface-strong px-4 py-2 text-sm font-medium text-ink transition hover:-translate-y-px hover:border-accent/40 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0 disabled:hover:border-line"
+          >
+            <RetryIcon />
+            Request changes
+          </button>
+        </div>
       </div>
     </div>
   );

@@ -64,6 +64,9 @@ class TravelState(TypedDict, total=False):
     approval_request: str
     approved: bool
     human_feedback: str
+    feedback_history: list[str]
+    revision_count: int
+    replan_reasoning: str
     final_response: str
 
     llm_calls: int
@@ -74,6 +77,10 @@ class Guardrail(BaseModel):
 
 class AgentPlan(BaseModel):
     agents: list[str] = Field(description="Names of the specialist agents to run, from the available list")
+    reasoning: str = Field(description="One short sentence explaining the choice")
+
+class ReplanPlan(BaseModel):
+    agents: list[str] = Field(description="Agents whose data must change to address the feedback; empty when the write-up alone can handle it")
     reasoning: str = Field(description="One short sentence explaining the choice")
 
 class Destination(BaseModel):
@@ -91,6 +98,7 @@ stay_extractor = llm.with_structured_output(Stays)
 destination_extractor = llm.with_structured_output(Destination)
 guardrail_checker = llm.with_structured_output(Guardrail)
 agent_selector = llm.with_structured_output(AgentPlan)
+replan_selector = llm.with_structured_output(ReplanPlan)
 
 # The specialists in the order they run; the supervisor picks a subset of these
 AGENT_ORDER = ["flight_agent", "weather_agent", "itinerary_agent", "hotel_agent", "budget_agent"]
@@ -103,6 +111,9 @@ DEFAULT_ORIGIN = os.getenv("DEFAULT_ORIGIN", "DEL")
 
 # Pause at hil_agent for approval before the write-up. Off until the UI can answer it.
 REQUIRE_APPROVAL = os.getenv("REQUIRE_APPROVAL", "true").lower() == "true"
+
+# How many times the traveller can send the plan back before the write-up is forced
+MAX_REVISIONS = int(os.getenv("MAX_REVISIONS", "3"))
 
 def get_database_connection():
     database_url = os.getenv("POSTGRES_DB")
@@ -305,12 +316,17 @@ def itinerary_agent(state:TravelState):
     user_query = state["user_query"]
     flight_data = state["flight_results"]
     weather_data = state["weather_results"]
+    human_feedback = state.get("human_feedback", "") if not state.get("approved") else ""
+    feedback_history = state.get("feedback_history", []) if human_feedback else []
+    previous_itinerary = state.get("itinerary", "") if human_feedback else ""
 
     ITINERARY_PROMPT = """You are a travel planner. Using the user's request and the flight and weather data below, write a day-by-day travel itinerary in Markdown.
+When a previous version and feedback are given, revise that version: change what the feedback asks for, follow every earlier round of feedback too, and leave the rest of the plan as it was.
 For each city, say which area to stay in and for how many nights, but don't name specific hotels; those are searched separately.
 Plan around the weather: put outdoor activities on the clearer days and indoor ones on wet days, and say when you do so.
 The forecast only covers the next few days, so ignore it if the trip starts later.
-Use only the flights in the data; don't make any up. If the user didn't give trip length or budget, pick sensible defaults and say so."""
+Use only the flights in the data; don't make any up. If the user didn't give trip length or budget, pick sensible defaults and say so.
+If the flight data is missing, empty or shows an error, still write the full itinerary. Say in one line that live flights couldn't be fetched and that the traveller should book separately. Never refuse to plan the trip over missing flights."""
 
 
     trip_details = f"""User request:
@@ -321,6 +337,20 @@ Flight data:
 
 Weather data:
 {weather_data}"""
+
+    if previous_itinerary:
+        trip_details += f"""
+
+Previous version of the itinerary, to revise:
+{previous_itinerary}"""
+
+    if feedback_history or human_feedback:
+        rounds = feedback_history or [human_feedback]
+        joined = "\n".join(f"- {item}" for item in rounds)
+        trip_details += f"""
+
+Traveller's feedback so far, most recent last:
+{joined}"""
 
     response = llm.invoke([
         SystemMessage(content=ITINERARY_PROMPT),
@@ -407,14 +437,83 @@ def hil_agent(state:TravelState):
 
     logger.info("hil_agent | resumed approved=%s feedback=%r", approved, preview(feedback, 60))
 
+    # Keep every round's feedback, so a later revision can't undo an earlier one
+    feedback_history = state.get("feedback_history", [])
+    if feedback and not approved:
+        feedback_history = [*feedback_history, feedback]
+
     return {
         "approval_request": approval_request,
         "approved": approved,
         "human_feedback": feedback,
+        "feedback_history": feedback_history,
         "messages": [
             AIMessage(content="Plan approved" if approved else f"Changes requested: {feedback}"),
         ],
     }
+
+def feedback_agent(state:TravelState):
+    """Work out which specialists have to run again to answer the traveller's feedback"""
+    feedback = state.get("human_feedback", "")
+    itinerary = state.get("itinerary", "")
+
+    plan = replan_selector.invoke(
+        "The traveller asked for changes to their travel plan. Choose which specialist agents must run again.\n"
+        "Available agents:\n"
+        "- flight_agent: live flights between the departure and destination airports\n"
+        "- weather_agent: current weather and a 5-day forecast for the destination\n"
+        "- itinerary_agent: writes the day-by-day plan\n"
+        "- hotel_agent: searches hotels for each place the itinerary stays overnight\n"
+        "- budget_agent: estimates the trip's cost and whether it fits the traveller's budget\n"
+        "Pick only the agents whose data must change. If the feedback is about wording, length or emphasis, "
+        "return an empty list, because the plan is rewritten anyway.\n"
+        "Say why in one sentence.\n\n"
+        f"Feedback: {feedback}\n\n"
+        f"Current itinerary:\n{itinerary}"
+    )
+
+    chosen = {name for name in plan.agents if name in AGENT_ORDER} if plan else set()
+
+    # Hotels are searched from the itinerary's overnight stays, and the budget is costed from it
+    if "hotel_agent" in chosen or "budget_agent" in chosen:
+        chosen.add("itinerary_agent")
+
+    selected = [name for name in AGENT_ORDER if name in chosen]
+    revision_count = state.get("revision_count", 0) + 1
+    logger.info(
+        "feedback_agent | revision=%s re-running=%s because %s",
+        revision_count, selected or "nothing, rewriting only", plan.reasoning if plan else "",
+    )
+
+    return {
+        "selected_agents": selected,
+        "replan_reasoning": plan.reasoning if plan else "",
+        "revision_count": revision_count,
+        "messages": [
+            AIMessage(content=f"Reworking the plan: {', '.join(selected) if selected else 'rewriting the write-up'}"),
+        ],
+        "llm_calls": state["llm_calls"]+1
+    }
+
+
+# Approved plans go to the write-up; rejected ones go back for a re-plan, up to MAX_REVISIONS times
+def route_after_hil(state:TravelState):
+    if state.get("approved"):
+        return "final_response_agent"
+
+    if state.get("revision_count", 0) >= MAX_REVISIONS:
+        logger.info("route_after_hil | revision cap of %s reached, writing the plan up", MAX_REVISIONS)
+        return "final_response_agent"
+
+    return "feedback_agent"
+
+
+# Re-run the chosen specialists, or go straight to the write-up when the feedback is only about wording
+def route_after_feedback(state:TravelState):
+    if state.get("selected_agents"):
+        return route_next(state)
+    return "final_response_agent"
+
 
 def final_response_agent(state:TravelState):
     user_query = state["user_query"]
@@ -431,7 +530,8 @@ In the Hotels section, group the hotels by each stay in the itinerary.
 In the Weather section, give the current conditions and the daily forecast from the weather data, and say that the forecast covers only the next few days.
 In the Estimated Budget section, use the budget analysis when there is one, keeping its figures and its verdict on whether the trip fits the budget.
 When the traveller has given feedback, rework the plan to follow it and say at the top what you changed. Their feedback outweighs the itinerary above.
-Use only the flights, hotels and weather in the data; don't make any up."""
+Use only the flights, hotels and weather in the data; don't make any up.
+If any of the data is missing, empty or shows an error, still write the whole plan: say in that section only that the information wasn't available and what the traveller should do instead. Never refuse the plan because one source is missing."""
 
     trip_details = f"""User request:
 {user_query}
@@ -485,6 +585,7 @@ graph.add_node("weather_agent",weather_agent)
 graph.add_node("itinerary_agent", itinerary_agent)
 graph.add_node("budget_agent", budget_agent)
 graph.add_node("hil_agent", hil_agent)
+graph.add_node("feedback_agent", feedback_agent)
 graph.add_node("final_response_agent", final_response_agent)
 
 
@@ -503,7 +604,8 @@ for agent_name in AGENT_ORDER:
         [*AGENT_ORDER, "hil_agent", "final_response_agent"],
     )
 
-graph.add_edge("hil_agent", "final_response_agent")
+graph.add_conditional_edges("hil_agent", route_after_hil, ["feedback_agent", "final_response_agent"])
+graph.add_conditional_edges("feedback_agent", route_after_feedback, [*AGENT_ORDER, "final_response_agent"])
 graph.add_edge("final_response_agent", END)
 
 DATABASE_URL = get_database_connection()
@@ -550,6 +652,9 @@ def run_travel_agent(query:str, thread_id:str| None = None):
         "approval_request": "",
         "approved": False,
         "human_feedback": "",
+        "feedback_history": [],
+        "revision_count": 0,
+        "replan_reasoning": "",
         "final_response": "",
 
         "llm_calls": 0,
