@@ -75,7 +75,8 @@
       "Bash(node url_test.mjs)",
       "Bash(.venv/bin/pip show *)",
       "Bash(docker version *)",
-      "Bash(.venv/bin/python -c ' *)"
+      "Bash(.venv/bin/python -c ' *)",
+      "Bash(git mv *)"
     ]
   }
 }
