@@ -219,6 +219,12 @@ MAX_STAYS = 5
 # How many hotels are shortlisted for each city the itinerary stays in
 HOTELS_PER_CITY = 2
 
+# Titles that mean the result is a list of hotels rather than a hotel
+LISTING_PAGE_HINTS = (
+    " best ", " top ", "hotels in", "hotel in", "where to stay", "places to stay", "hostels in",
+    " guide", " review of", "resorts in", "apartments in", " vs ",
+)
+
 # Their previews are watermarked, so a header photo from one of these looks broken
 STOCK_PHOTO_HOSTS = ("istockphoto", "gettyimages", "shutterstock", "alamy", "dreamstime", "depositphotos", "123rf")
 
@@ -431,12 +437,15 @@ def follow_up_supervisor(state:TravelState, user_query:str, existing_plan:str):
 
     # A change to the existing plan: hand it to feedback_agent, the same path as the Request changes button
     logger.info("supervisor | follow-up refines the plan: %s", preview(user_query, 60))
+    # Kept round by round, so asking for something new doesn't quietly undo an earlier request
+    feedback_history = [*state.get("feedback_history", []), user_query]
     return {
         "guardrail_allowed": True,
         "guardrail_reason": intent.reason,
         "trip_request": previous_request or user_query,
         "is_refinement": True,
         "human_feedback": user_query,
+        "feedback_history": feedback_history,
         "messages": [AIMessage(content="Reworking the plan you already have")],
         "llm_calls": state["llm_calls"]+1
     }
@@ -664,7 +673,25 @@ def stay_location(stay:Stay):
     return f"{stay.area}, {stay.city}" if stay.area else stay.city
 
 
-def shortlist_hotels(stays:list, candidates:list):
+def names_a_hotel(name:str):
+    """Hotel searches return round-up articles and price-comparison pages as well as hotels, and their
+    titles read like listings. A card headed "2 star hotels in Zurich" is a page, not somewhere to stay.
+    Phrases alone don't catch them in every language, so the shape of the title counts too."""
+    name = name.strip()
+    lowered = f" {name.lower()} "
+
+    if not name or any(hint in lowered for hint in LISTING_PAGE_HINTS):
+        return False
+
+    # Site titles glue on the publisher, like "Hoteis em Zurique - compare precos | Skyscanner"
+    if any(separator in name for separator in ("|", " - ", " – ", " — ")):
+        return False
+
+    # Real hotel names are short; a long one is a sentence describing a page
+    return len(name.split()) <= 8
+
+
+def shortlist_hotels(stays:list, candidates:list, preference:str = ""):
     """Pick HOTELS_PER_CITY hotels for each stay, keeping only links the search actually returned"""
     listing = []
     for index, (stay, results) in enumerate(zip(stays, candidates)):
@@ -672,9 +699,16 @@ def shortlist_hotels(stays:list, candidates:list):
         lines += [f"- {result['title']} | {result['url']} | {result['content'][:200]}" for result in results]
         listing.append("\n".join(lines))
 
+    wanted = (
+        f"The traveller asked for: {preference}. This outweighs everything else: pick the hotels that fit it, "
+        "and say in each hotel's reason how it does.\n"
+        if preference else ""
+    )
+
     shortlist = hotel_picker.invoke(
         f"Choose the {HOTELS_PER_CITY} best hotels for each stay below, from that stay's own search results.\n"
-        "Prefer hotels that are well placed for the stay's area and well reviewed.\n"
+        + wanted +
+        "Otherwise prefer hotels that are well placed for the stay's area and well reviewed.\n"
         "Give each hotel's own name, like 'Rove Downtown'. Many of these results are round-up articles listing "
         "several hotels, so never use an article or category title, like 'The best hotels in Dubai', as a name.\n"
         "Copy each hotel's url exactly from the result it came from; never write a url that isn't listed.\n\n"
@@ -690,16 +724,18 @@ def shortlist_hotels(stays:list, candidates:list):
         kept = []
 
         for hotel in chosen.get(index, []):
-            # Drop anything whose link the search didn't return, rather than show an invented one
-            if hotel.url in allowed and hotel.url not in seen:
+            # Drop anything whose link the search didn't return, rather than show an invented one,
+            # and anything named after the round-up article it came from
+            if hotel.url in allowed and hotel.url not in seen and names_a_hotel(hotel.name):
                 seen.add(hotel.url)
                 kept.append({"name": hotel.name, "url": hotel.url, "why": hotel.why})
 
-        # Top up from the search results when the model returned too few, or made links up
+        # Top up from the search results when the model returned too few, or made links up.
+        # Showing one real hotel beats padding the list out with a "best hotels in X" article.
         for result in results:
             if len(kept) >= HOTELS_PER_CITY:
                 break
-            if result["url"] not in seen:
+            if result["url"] not in seen and names_a_hotel(result["title"]):
                 seen.add(result["url"])
                 kept.append({"name": result["title"], "url": result["url"], "why": result["content"][:200]})
 
@@ -733,9 +769,30 @@ def hotels_text(picks:list):
     return "\n".join(lines)
 
 
+def stay_preference(state:TravelState):
+    """What the traveller has said about where they want to stay: their budget, and every round of
+    feedback. Without this the search runs the same query again and Tavily returns its cached results,
+    so asking for cheaper hotels gives back exactly the same ones."""
+    constraints = state.get("trip_constraints") or {}
+    parts = []
+
+    budget = constraints.get("budget", "")
+    if budget and budget != INTAKE_DEFAULTS["budget"]:
+        parts.append(f"total trip budget {budget}")
+
+    # Every round, so a later change can't quietly undo an earlier one
+    rounds = state.get("feedback_history") or []
+    if not rounds and state.get("human_feedback"):
+        rounds = [state["human_feedback"]]
+
+    parts.extend(rounds)
+    return ", ".join(part for part in parts if part)
+
+
 def hotel_agent(state:TravelState):
     user_query = state.get("trip_request") or state["user_query"]
     itinerary = state.get("itinerary", "")
+    preference = stay_preference(state)
 
     result = stay_extractor.invoke(
         "List every place the traveller stays overnight in this itinerary, in trip order.\n\n"
@@ -755,11 +812,12 @@ def hotel_agent(state:TravelState):
     candidates = []
     for stay in stays:
         location = stay_location(stay)
-        logger.info("hotel_agent | searching hotels in %s", location)
-        found = search_place(f"best hotels in {location}", max_results=6)
+        query = f"best hotels in {location}" + (f" for {preference}" if preference else "")
+        logger.info("hotel_agent | searching %r", query)
+        found = search_place(query, max_results=8)
         candidates.append([result for result in found["results"] if result.get("url")])
 
-    picks = shortlist_hotels(stays, candidates)
+    picks = shortlist_hotels(stays, candidates, preference)
     logger.info("hotel_agent | shortlisted %s hotels across %s stays", len(picks), len(stays))
 
     return {
