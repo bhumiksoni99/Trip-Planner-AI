@@ -25,13 +25,9 @@ client = MultiServerMCPClient({
         "transport": "streamable_http",
         "url": f"https://mcp.tavily.com/mcp/?tavilyApiKey={TAVILY_API_KEY}",
     },
-    # Runs locally as a subprocess; uvx downloads the package on first use
-    "aviationstack": {
-        "transport": "stdio",
-        "command": "uvx",
-        "args": ["aviationstack-mcp"],
-        "env": {"AVIATION_STACK_API_KEY": AVIATIONSTACK_API_KEY},
-    },
+    # Flights come from tools/flight_tool.py instead: AviationStack's free plan only serves
+    # /v1/flights, so the MCP server's route tools return nothing. It also needed `uvx`, which
+    # isn't in the deployment image, and one failing server stopped the other two loading.
     # Our own server, run by the same Python as this app
     "weather": {
         "transport": "stdio",
@@ -51,19 +47,17 @@ async def get_all_tools():
 
 
 search_tool = None
-aviation_tools = {}
 weather_tools = {}
 
 
 async def load_mcp_tools():
-    """Fetch every server's tools once and keep them; returns (search_tool, aviation_tools, weather_tools)."""
-    global search_tool, aviation_tools, weather_tools
+    """Fetch every server's tools once and keep them; returns (search_tool, weather_tools)."""
+    global search_tool, weather_tools
 
-    if search_tool is not None and aviation_tools and weather_tools:
-        return search_tool, aviation_tools, weather_tools
+    if search_tool is not None and weather_tools:
+        return search_tool, weather_tools
 
     tavily_tools = await client.get_tools(server_name="tavily")
-    aviation = await client.get_tools(server_name="aviationstack")
     weather = await client.get_tools(server_name="weather")
 
     search = next((tool for tool in tavily_tools if tool.name == "tavily_search"), None)
@@ -72,13 +66,9 @@ async def load_mcp_tools():
         raise RuntimeError(f"tavily_search is not on the Tavily MCP server. Available tools: {available}")
 
     search_tool = search
-    aviation_tools = {tool.name: tool for tool in aviation}
     weather_tools = {tool.name: tool for tool in weather}
-    logger.info(
-        "loaded tools | tavily=%s aviationstack=%s weather=%s",
-        len(tavily_tools), len(aviation_tools), len(weather_tools),
-    )
-    return search_tool, aviation_tools, weather_tools
+    logger.info("loaded tools | tavily=%s weather=%s", len(tavily_tools), len(weather_tools))
+    return search_tool, weather_tools
 
 
 # For calling from sync code, such as the LangGraph nodes in agent.py
@@ -99,7 +89,7 @@ def run_sync(coro):
 
 
 async def tavily_search(query: str, max_results: int = 5) -> str:
-    tool, _, _ = await load_mcp_tools()
+    tool, _ = await load_mcp_tools()
     logger.info("tavily_search | query=%r max_results=%s", query, max_results)
     content = await tool.ainvoke({"query": query, "max_results": max_results})
 
@@ -109,29 +99,9 @@ async def tavily_search(query: str, max_results: int = 5) -> str:
     return "\n".join(block.get("text", "") for block in content if isinstance(block, dict))
 
 
-async def get_flights(dep_iata: str, arr_iata: str, airline_iata: str = "", limit: int = 10) -> str:
-    """List scheduled routes between two airports, e.g. aviation_tool("DEL", "LHR")."""
-    _, tools, _ = await load_mcp_tools()
-
-    tool = tools.get("list_routes")
-    if tool is None:
-        raise RuntimeError(f"list_routes is not on the server. Available tools: {', '.join(tools)}")
-
-    logger.info("list_routes | %s -> %s limit=%s", dep_iata.upper(), arr_iata.upper(), limit)
-    content = await tool.ainvoke({
-        "dep_iata": dep_iata.upper(),
-        "arr_iata": arr_iata.upper(),
-        "airline_iata": airline_iata.upper(),
-        "limit": limit,
-    })
-
-    if isinstance(content, str):
-        return content
-    return "\n".join(block.get("text", "") for block in content if isinstance(block, dict))
-
 async def get_weather(city: str, forecast_days: int = 5) -> str:
     """Current weather and the days ahead for a city, e.g. get_weather("Barcelona")."""
-    _, _, tools = await load_mcp_tools()
+    _, tools = await load_mcp_tools()
 
     logger.info("weather | city=%s forecast_days=%s", city, forecast_days)
     current = await tools["get_weather"].ainvoke({"city": city})

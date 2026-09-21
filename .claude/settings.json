@@ -73,7 +73,9 @@
       "Bash(node shot_header.mjs)",
       "Bash(perl -pi -e \"s/\\\\{ name: \\\\\"Five days in Lisbon\\\\\" \\\\}/{ name: \\\\\"Five days in Lisbon\\\\\", exact: true }/\" url_test.mjs)",
       "Bash(node url_test.mjs)",
-      "Bash(.venv/bin/pip show *)"
+      "Bash(.venv/bin/pip show *)",
+      "Bash(docker version *)",
+      "Bash(.venv/bin/python -c ' *)"
     ]
   }
 }
