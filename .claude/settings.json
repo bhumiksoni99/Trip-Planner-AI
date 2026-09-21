@@ -76,7 +76,13 @@
       "Bash(.venv/bin/pip show *)",
       "Bash(docker version *)",
       "Bash(.venv/bin/python -c ' *)",
-      "Bash(git mv *)"
+      "Bash(git mv *)",
+      "Bash(sed -i '' 's/^import requests$/import requests\\\\nimport threading/' agent.py)",
+      "Bash(sed -i '' -e 's/^    result = travel_graph\\\\.invoke\\(/    result = get_travel_graph\\(\\).invoke\\(/' -e 's/^        travel_graph\\\\.stream\\(/        get_travel_graph\\(\\).stream\\(/' -e 's/travel_graph\\\\.get_state\\(config\\)\\\\.values/get_travel_graph\\(\\).get_state\\(config\\).values/' agent.py)",
+      "Bash(curl -s -m 60 -w \"\\\\nHTTP %{http_code} in %{time_total}s\\\\n\" https://trip-planner-ai-68zg.onrender.com/health)",
+      "Bash(curl -s -m 280 -w '\\\\n--- HTTP %{http_code} in %{time_total}s ---\\\\n' -X POST https://trip-planner-ai-68zg.onrender.com/api/travel -H 'Content-Type: application/json' -d '{\"message\":\"Plan a 3 day Zurich trip from Delhi in mid-March under 1 lakh, relaxed pace, love street food\",\"thread_id\":\"smoke-render-1\"}')",
+      "Bash(curl -s -m 280 -X POST https://trip-planner-ai-68zg.onrender.com/api/travel -H 'Content-Type: application/json' -d '{\"message\":\"Plan a 3 day Zurich trip from Delhi in mid-March under 1 lakh, relaxed pace, love street food\",\"thread_id\":\"smoke-render-2\"}')",
+      "Bash(/usr/bin/python3 -c ' *)"
     ]
   }
 }
