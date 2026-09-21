@@ -44,7 +44,10 @@ llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", api_key=GEMINI_API_K
 
 class TravelState(TypedDict, total=False):
     messages: Annotated[list[AnyMessage], operator.add]
-    user_query: str
+    user_query: str          # the latest message, which may be a follow-up like "day 2 doesn't sound good"
+    trip_request: str        # the last full trip description, kept across follow-ups
+    plan_history: list[str]  # the plans finished so far in this thread, newest last
+    is_refinement: bool      # this message changes the existing plan instead of starting a new trip
 
     # Supervisor + guardrail state
     guardrail_allowed: bool
@@ -75,6 +78,12 @@ class Guardrail(BaseModel):
     allowed: bool = Field(description="True if the request is about travel")
     reason: str = Field(description="One short sentence explaining the decision")
 
+class MessageIntent(BaseModel):
+    is_travel: bool = Field(description="True if the message is about travel, including a change to the plan already made")
+    is_refinement: bool = Field(description="True if it asks to change the existing plan rather than start a different trip")
+    trip_request: str | None = Field(description="The full trip description when this is a new trip, otherwise null")
+    reason: str = Field(description="One short sentence explaining the decision")
+
 class AgentPlan(BaseModel):
     agents: list[str] = Field(description="Names of the specialist agents to run, from the available list")
     reasoning: str = Field(description="One short sentence explaining the choice")
@@ -99,6 +108,7 @@ destination_extractor = llm.with_structured_output(Destination)
 guardrail_checker = llm.with_structured_output(Guardrail)
 agent_selector = llm.with_structured_output(AgentPlan)
 replan_selector = llm.with_structured_output(ReplanPlan)
+intent_classifier = llm.with_structured_output(MessageIntent)
 
 # The specialists in the order they run; the supervisor picks a subset of these
 AGENT_ORDER = ["flight_agent", "weather_agent", "itinerary_agent", "hotel_agent", "budget_agent"]
@@ -135,6 +145,11 @@ def get_database_connection():
 
 def supervisor_agent(state:TravelState):
     user_query = state["user_query"]
+    existing_plan = state.get("itinerary", "")
+
+    # A follow-up in a thread that already has a plan, e.g. "day 2 doesn't sound good"
+    if existing_plan:
+        return follow_up_supervisor(state, user_query, existing_plan)
 
     check = guardrail_checker.invoke(
         "Decide whether this request is about travel: trips, flights, hotels, destinations, itineraries or travel advice.\n"
@@ -176,6 +191,8 @@ def supervisor_agent(state:TravelState):
         return {
             "guardrail_allowed": True,
             "guardrail_reason": reason,
+            "trip_request": user_query,
+            "is_refinement": False,
             "selected_agents": selected,
             "supervisor_reasoning": plan.reasoning if plan else "",
             "messages": [
@@ -201,6 +218,64 @@ def supervisor_agent(state:TravelState):
     }
 
 
+def follow_up_supervisor(state:TravelState, user_query:str, existing_plan:str):
+    """Decide whether a follow-up changes the plan already made, or asks for a different trip."""
+    previous_request = state.get("trip_request", "")
+
+    intent = intent_classifier.invoke(
+        "This conversation already has a travel plan. Decide what the traveller's new message means.\n"
+        "A message that comments on, corrects or adds to the existing plan is a refinement, even when it is short "
+        'like "day 2 doesn\'t sound good" or "make it cheaper".\n'
+        "A message describing a different trip is not a refinement; give its full trip description.\n"
+        "Only a message with nothing to do with travel is not travel.\n\n"
+        f"Trip so far: {previous_request}\n\n"
+        f"Current plan:\n{existing_plan}\n\n"
+        f"New message: {user_query}"
+    )
+
+    if not (intent and intent.is_travel):
+        reason = intent.reason if intent else "Couldn't tell what this request is about."
+        refusal = (
+            "I can only help with travel planning: flights, hotels, weather and itineraries.\n\n"
+            f"{reason}\n\n"
+            'Try something like "Plan a 5 day trip to Barcelona from Delhi".'
+        )
+        logger.info("supervisor | follow-up refused: %s", reason)
+        return {
+            "guardrail_allowed": False,
+            "guardrail_reason": reason,
+            "final_response": refusal,
+            "messages": [AIMessage(content=refusal)],
+            "llm_calls": state["llm_calls"]+1
+        }
+
+    # A different trip: start over, but keep the finished plans in plan_history
+    if not intent.is_refinement:
+        logger.info("supervisor | follow-up is a new trip: %s", preview(intent.trip_request or user_query, 60))
+        return {
+            "guardrail_allowed": True,
+            "guardrail_reason": intent.reason,
+            "trip_request": intent.trip_request or user_query,
+            "is_refinement": False,
+            "itinerary": "",  # don't revise the old trip's plan
+            "selected_agents": list(AGENT_ORDER),
+            "messages": [AIMessage(content="New trip request, planning from scratch")],
+            "llm_calls": state["llm_calls"]+1
+        }
+
+    # A change to the existing plan: hand it to feedback_agent, the same path as the Request changes button
+    logger.info("supervisor | follow-up refines the plan: %s", preview(user_query, 60))
+    return {
+        "guardrail_allowed": True,
+        "guardrail_reason": intent.reason,
+        "trip_request": previous_request or user_query,
+        "is_refinement": True,
+        "human_feedback": user_query,
+        "messages": [AIMessage(content="Reworking the plan you already have")],
+        "llm_calls": state["llm_calls"]+1
+    }
+
+
 # The next agent the supervisor picked after this one, or the write-up when none are left
 def route_next(state:TravelState, current:str | None = None):
     selected = state.get("selected_agents") or AGENT_ORDER
@@ -218,11 +293,16 @@ def route_next(state:TravelState, current:str | None = None):
 def route_after_supervisor(state:TravelState):
     if not state["guardrail_allowed"]:
         return END
+
+    # A follow-up that changes the plan goes through the same agent the approval loop uses
+    if state.get("is_refinement"):
+        return "feedback_agent"
+
     return route_next(state)
 
 
 def flight_agent(state:TravelState):
-    user_query = state["user_query"]
+    user_query = state.get("trip_request") or state["user_query"]
 
     # The MCP list_routes tool needs a paid AviationStack plan, so this calls /flights directly.
     # search_flights works out the airports itself, with its own LLM call.
@@ -238,7 +318,7 @@ def flight_agent(state:TravelState):
     }
 
 def weather_agent(state:TravelState):
-    user_query = state["user_query"]
+    user_query = state.get("trip_request") or state["user_query"]
 
     destination = destination_extractor.invoke(
         "Name the main destination city of this travel request.\n"
@@ -265,7 +345,7 @@ def weather_agent(state:TravelState):
     }
 
 def hotel_agent(state:TravelState):
-    user_query = state["user_query"]
+    user_query = state.get("trip_request") or state["user_query"]
     itinerary = state["itinerary"]
 
     result = stay_extractor.invoke(
@@ -313,7 +393,7 @@ def hotel_agent(state:TravelState):
 
 
 def itinerary_agent(state:TravelState):
-    user_query = state["user_query"]
+    user_query = state.get("trip_request") or state["user_query"]
     flight_data = state["flight_results"]
     weather_data = state["weather_results"]
     human_feedback = state.get("human_feedback", "") if not state.get("approved") else ""
@@ -369,7 +449,7 @@ Traveller's feedback so far, most recent last:
 
 def budget_agent(state:TravelState):
     """Analyze whether the planned trip fits the user's budget"""
-    user_query = state["user_query"]
+    user_query = state.get("trip_request") or state["user_query"]
     flight_data = state["flight_results"]
     hotels_data = state["hotel_results"]
     itinerary = state["itinerary"]
@@ -516,7 +596,7 @@ def route_after_feedback(state:TravelState):
 
 
 def final_response_agent(state:TravelState):
-    user_query = state["user_query"]
+    user_query = state.get("trip_request") or state["user_query"]
     flight_data = state["flight_results"]
     hotels_data = state["hotel_results"]
     weather_data = state["weather_results"]
@@ -568,8 +648,12 @@ Traveller's feedback on the plan:
         bool(human_feedback),
     )
 
+    # Keep the last few finished plans, so a follow-up in this thread has something to build on
+    plan_history = [*state.get("plan_history", [])[-2:], f"Request: {user_query}\n\nPlan:\n{itinerary}"]
+
     return {
         "final_response": final_response,
+        "plan_history": plan_history,
         "messages": [
             AIMessage(content=final_response),
         ],
@@ -593,7 +677,7 @@ graph.add_edge(START, "supervisor_agent")
 graph.add_conditional_edges(
     "supervisor_agent",
     route_after_supervisor,
-    [*AGENT_ORDER, "hil_agent", "final_response_agent", END],
+    [*AGENT_ORDER, "feedback_agent", "hil_agent", "final_response_agent", END],
 )
 
 # Each specialist hands over to the next one the supervisor picked, skipping the rest
@@ -630,9 +714,12 @@ def run_travel_agent(query:str, thread_id:str| None = None):
         }
     }
 
+    # Only this run's bookkeeping is reset. The previous run's trip_request, itinerary and other
+    # results stay in the thread's checkpoint, so a follow-up can build on the plan already made.
     initial_state = {
         "messages": [HumanMessage(content=query)],
         "user_query": query,
+        "is_refinement": False,
 
         # Supervisor + guardrail state
         "guardrail_allowed": False,
@@ -640,13 +727,6 @@ def run_travel_agent(query:str, thread_id:str| None = None):
         "selected_agents": [],
         "trip_constraints": {},
         "supervisor_reasoning": "",
-
-        # Specialist results
-        "flight_results": "",
-        "hotel_results": "",
-        "weather_results": "",
-        "itinerary": "",
-        "budget_results": "",
 
         # Approval state
         "approval_request": "",
