@@ -85,7 +85,7 @@ function Avatar() {
 function UserMessage({ content }: { content: string }) {
   return (
     <div className="flex justify-end">
-      <div className="max-w-[85%] rounded-3xl rounded-br-lg bg-bubble px-4 py-2.5 leading-relaxed whitespace-pre-wrap text-ink">
+      <div className="max-w-[85%] rounded-sharp bg-bubble px-4 py-2.5 leading-relaxed whitespace-pre-wrap text-ink">
         {content}
       </div>
     </div>
@@ -124,7 +124,7 @@ function ErrorMessage({ content, onRetry }: { content: string; onRetry?: () => v
       <Avatar />
       <div
         role="alert"
-        className="min-w-0 flex-1 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-200"
+        className="min-w-0 flex-1 rounded-sharp border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800"
       >
         <p className="font-semibold">Couldn&apos;t plan this trip</p>
         <p className="mt-0.5 opacity-90">{content}</p>
@@ -132,7 +132,7 @@ function ErrorMessage({ content, onRetry }: { content: string; onRetry?: () => v
           <button
             type="button"
             onClick={onRetry}
-            className="mt-2.5 inline-flex items-center gap-1.5 rounded-lg px-2 py-1 -ml-2 font-medium transition hover:bg-red-100 dark:hover:bg-red-900/40"
+            className="mt-2.5 inline-flex items-center gap-1.5 rounded-sharp px-2 py-1 -ml-2 font-medium transition hover:bg-red-100"
           >
             <RetryIcon />
             Try again
@@ -162,7 +162,7 @@ function ApprovalCard({
   return (
     <div className="flex gap-3 sm:gap-4">
       <span aria-hidden className="size-8 shrink-0" />
-      <div className="min-w-0 flex-1 rounded-2xl border border-line bg-surface px-4 py-3">
+      <div className="min-w-0 flex-1 rounded-sharp border border-line bg-surface px-4 py-3">
         <p className="text-sm font-medium text-ink">Happy with this plan?</p>
         <p className="mt-0.5 text-sm text-muted">
           Approve it for the full write-up, or say what you&apos;d like changed and I&apos;ll plan it again.
@@ -183,14 +183,14 @@ function ApprovalCard({
             }
           }}
           placeholder="What would you like changed? e.g. cheaper hotels, more time in the old town"
-          className="mt-3 block w-full resize-none rounded-xl border border-line bg-surface-strong px-3 py-2 text-sm text-ink placeholder:text-muted/70 focus:border-accent/50 focus:outline-none"
+          className="mt-3 block w-full resize-none rounded-sharp border border-line bg-surface px-3 py-2 text-sm text-ink placeholder:text-muted/70 focus:border-accent/50 focus:outline-none"
         />
 
         <div className="mt-3 flex flex-wrap gap-2">
           <button
             type="button"
             onClick={onApprove}
-            className="inline-flex items-center gap-2 rounded-full bg-accent px-4 py-2 text-sm font-medium text-white transition hover:-translate-y-px"
+            className="inline-flex items-center gap-2 rounded-sharp bg-accent px-4 py-2 text-sm font-medium text-on-accent transition hover:-translate-y-px"
           >
             <CheckIcon className="size-4" />
             Approve plan
@@ -199,7 +199,7 @@ function ApprovalCard({
             type="button"
             onClick={submitChanges}
             disabled={!feedback.trim()}
-            className="inline-flex items-center gap-2 rounded-full border border-line bg-surface-strong px-4 py-2 text-sm font-medium text-ink transition hover:-translate-y-px hover:border-accent/40 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0 disabled:hover:border-line"
+            className="inline-flex items-center gap-2 rounded-sharp border border-line bg-surface px-4 py-2 text-sm font-medium text-ink transition hover:-translate-y-px hover:border-accent/40 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0 disabled:hover:border-line"
           >
             <RetryIcon />
             Request changes
@@ -234,9 +234,9 @@ function ThinkingMessage({ progress }: { progress: ProgressState }) {
           <AgentProgress progress={progress} />
         ) : (
           <div aria-hidden className="mt-5 space-y-2.5">
-            <div className="shimmer h-3.5 w-full rounded-md" />
-            <div className="shimmer h-3.5 w-11/12 rounded-md" />
-            <div className="shimmer h-3.5 w-3/5 rounded-md" />
+            <div className="shimmer h-3.5 w-full rounded-sharp" />
+            <div className="shimmer h-3.5 w-11/12 rounded-sharp" />
+            <div className="shimmer h-3.5 w-3/5 rounded-sharp" />
           </div>
         )}
       </div>

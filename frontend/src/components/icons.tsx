@@ -65,6 +65,23 @@ export function SendIcon({ className = "size-4" }: IconProps) {
   );
 }
 
+export function GlobeIcon({ className = "size-9" }: IconProps) {
+  return (
+    <svg aria-hidden viewBox="0 0 24 24" className={className} {...stroke} strokeWidth={1.4}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M3 12h18M12 3c2.5 2.6 2.5 15 0 18M12 3c-2.5 2.6-2.5 15 0 18" />
+    </svg>
+  );
+}
+
+export function ArrowRightIcon({ className = "size-3.5" }: IconProps) {
+  return (
+    <svg aria-hidden viewBox="0 0 20 20" className={className} {...stroke} strokeWidth={2}>
+      <path d="M4 10h11M10 4l6 6-6 6" />
+    </svg>
+  );
+}
+
 export function CopyIcon({ className = "size-4" }: IconProps) {
   return (
     <svg aria-hidden viewBox="0 0 20 20" className={className} {...stroke}>

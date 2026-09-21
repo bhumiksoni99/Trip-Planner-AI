@@ -34,7 +34,7 @@ export default function IntakeCard({ pause, onSubmit, onSkipAll }: IntakeCardPro
       <span aria-hidden className="brand-mark size-8 shrink-0 text-sm">
         ✈️
       </span>
-      <div className="min-w-0 flex-1 rounded-2xl border border-line bg-surface px-4 py-4">
+      <div className="min-w-0 flex-1 rounded-sharp border border-line bg-surface px-4 py-4">
         <p className="text-xs font-medium tracking-wide text-muted uppercase">
           Question {step + 1} of {pause.questions.length}
         </p>
@@ -48,7 +48,7 @@ export default function IntakeCard({ pause, onSubmit, onSkipAll }: IntakeCardPro
               key={option}
               type="button"
               onClick={() => advance(option)}
-              className="rounded-full border border-line bg-surface-strong px-3.5 py-1.5 text-sm text-ink transition hover:-translate-y-px hover:border-accent/50"
+              className="rounded-sharp border border-line bg-surface px-3.5 py-1.5 text-sm text-ink transition hover:-translate-y-px hover:border-accent/50"
             >
               {option}
             </button>
@@ -71,12 +71,12 @@ export default function IntakeCard({ pause, onSubmit, onSkipAll }: IntakeCardPro
             value={typed}
             onChange={(event) => setTyped(event.target.value)}
             placeholder={question.placeholder}
-            className="min-w-0 flex-1 rounded-xl border border-line bg-surface-strong px-3 py-2 text-sm text-ink placeholder:text-muted/70 focus:border-accent/50 focus:outline-none"
+            className="min-w-0 flex-1 rounded-sharp border border-line bg-surface px-3 py-2 text-sm text-ink placeholder:text-muted/70 focus:border-accent/50 focus:outline-none"
           />
           <button
             type="submit"
             disabled={!typed.trim()}
-            className="shrink-0 rounded-full bg-accent px-4 py-2 text-sm font-medium text-white transition hover:-translate-y-px disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:translate-y-0"
+            className="shrink-0 rounded-sharp bg-accent px-4 py-2 text-sm font-medium text-on-accent transition hover:-translate-y-px disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:translate-y-0"
           >
             {isLast ? "Done" : "Next"}
           </button>

@@ -194,7 +194,7 @@ export default function ChatApp() {
         />
 
         <div className="flex min-w-0 flex-1 flex-col">
-          <header className="flex h-14 shrink-0 items-center gap-1 px-2 sm:px-3">
+          <header className="flex h-15 shrink-0 items-center gap-1 border-b border-line px-2 sm:px-3">
             <button
               type="button"
               className="icon-btn md:hidden"
@@ -213,9 +213,12 @@ export default function ChatApp() {
                 <SidebarIcon />
               </button>
             )}
-            <h1 className="min-w-0 truncate px-2 text-sm font-medium text-ink">
-              {activeThread?.title ?? "New trip"}
-            </h1>
+            <div className="flex min-w-0 items-baseline gap-3 px-2">
+              <span className="eyebrow shrink-0">{activeThread ? "Trip" : "New trip"}</span>
+              <h1 className="min-w-0 truncate text-[15px] font-medium text-ink">
+                {activeThread?.title ?? "Untitled"}
+              </h1>
+            </div>
             <button
               type="button"
               className={`icon-btn ml-auto ${sidebarCollapsed ? "" : "md:hidden"}`}

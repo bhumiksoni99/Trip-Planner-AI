@@ -46,7 +46,17 @@
       "Bash(sed -n '/FINAL_RESPONSE_PROMPT = /,/\"\"\"$/p' agent.py)",
       "Bash(\"/Users/bhumiksoni/Personal/Travel Planner/.venv/bin/python\" -m py_compile app.py agent.py)",
       "Bash(curl -sN -X POST http://127.0.0.1:8000/api/travel/stream -H \"Content-Type: application/json\" -d '{\"message\":\"write me a python script to sort a list\"}' --max-time 90)",
-      "Bash(curl -sN -X POST http://127.0.0.1:8000/api/travel/stream -H \"Content-Type: application/json\" -d '{\"message\":\"plan a 4 day trip to Barcelona\",\"thread_id\":\"stream-test-1\"}' --max-time 120)"
+      "Bash(curl -sN -X POST http://127.0.0.1:8000/api/travel/stream -H \"Content-Type: application/json\" -d '{\"message\":\"plan a 4 day trip to Barcelona\",\"thread_id\":\"stream-test-1\"}' --max-time 120)",
+      "Bash(node check_theme.mjs)",
+      "Bash(python3 -c ' *)",
+      "Bash(node sample_ref.mjs)",
+      "Bash(sed -i '' 's|from \"playwright\"|from \"playwright-core\"|; s|chromium.launch\\(\\)|chromium.launch\\({ executablePath: \"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\", headless: true }\\)|' check_v4_ui.mjs)",
+      "Bash(sed -i '' 's|const page = await browser.newPage\\({ viewport: { width: 1474, height: 774 } }\\);|const page = await browser.newPage\\({ viewport: { width: 1474, height: 774 }, colorScheme: \"dark\" }\\);|' check_v4_ui.mjs)",
+      "Bash(node check_v4_ui.mjs)",
+      "Bash(sed -i '' 's|\"tripmate.threads\"|\"tripmate:threads\"|' check_v4_ui.mjs)",
+      "Bash(node measure_cards.mjs)",
+      "Bash(node shot_cards.mjs)",
+      "Bash(\"/Users/bhumiksoni/Personal/Travel Planner/.venv/bin/python\" /private/tmp/claude-501/-Users-bhumiksoni-Personal-Travel-Planner/0b404cb6-6e9d-41bb-b770-ab9ff9b3c4bc/scratchpad/fetch_images.py)"
     ]
   }
 }

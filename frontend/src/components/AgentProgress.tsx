@@ -92,5 +92,5 @@ function StatusIcon({ status }: { status?: AgentStatus }) {
     );
   }
 
-  return <span aria-hidden className="size-4 shrink-0 rounded-full border-2 border-line" />;
+  return <span aria-hidden className="size-4 shrink-0 rounded-sharp border-2 border-line" />;
 }

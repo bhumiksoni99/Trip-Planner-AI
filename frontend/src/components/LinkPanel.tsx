@@ -62,7 +62,7 @@ export default function LinkPanel({ link, onClose }: { link: OpenLink; onClose: 
 
       <aside
         aria-label={link.label}
-        className="slide-up fixed inset-x-0 bottom-0 z-50 mx-auto flex h-[85dvh] max-w-6xl flex-col rounded-t-3xl border border-line bg-surface shadow-[var(--composer-shadow)] print:hidden"
+        className="slide-up fixed inset-x-0 bottom-0 z-50 mx-auto flex h-[85dvh] max-w-6xl flex-col rounded-t-sharp border border-line bg-surface shadow-[var(--composer-shadow)] print:hidden"
       >
         <span aria-hidden className="mx-auto mt-2 h-1 w-10 shrink-0 rounded-full bg-line" />
 
@@ -86,11 +86,11 @@ export default function LinkPanel({ link, onClose }: { link: OpenLink; onClose: 
             <div aria-hidden className="space-y-4">
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
                 {[0, 1, 2, 3].map((index) => (
-                  <div key={index} className="shimmer aspect-4/3 rounded-2xl" />
+                  <div key={index} className="shimmer aspect-4/3 rounded-sharp" />
                 ))}
               </div>
-              <div className="shimmer h-4 w-2/3 rounded-md" />
-              <div className="shimmer h-4 w-1/2 rounded-md" />
+              <div className="shimmer h-4 w-2/3 rounded-sharp" />
+              <div className="shimmer h-4 w-1/2 rounded-sharp" />
             </div>
           )}
 
@@ -106,7 +106,7 @@ export default function LinkPanel({ link, onClose }: { link: OpenLink; onClose: 
                       src={image.url}
                       alt={image.description ?? link.label}
                       loading="lazy"
-                      className="aspect-4/3 w-full rounded-2xl border border-line object-cover"
+                      className="aspect-4/3 w-full rounded-sharp border border-line object-cover"
                       onError={(event) => event.currentTarget.classList.add("hidden")}
                     />
                   ))}
@@ -115,7 +115,7 @@ export default function LinkPanel({ link, onClose }: { link: OpenLink; onClose: 
 
               <ul className="mt-5 space-y-3">
                 {preview.results.map((result) => (
-                  <li key={result.url} className="rounded-2xl border border-line bg-surface-strong px-4 py-3">
+                  <li key={result.url} className="rounded-sharp border border-line bg-surface px-4 py-3">
                     <a
                       href={result.url}
                       target="_blank"
