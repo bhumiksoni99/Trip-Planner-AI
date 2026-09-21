@@ -43,7 +43,10 @@
       "Bash(node check_approval.mjs)",
       "Bash(npm run *)",
       "Bash(sed -n '/ITINERARY_PROMPT = /,/\"\"\"$/p' agent.py)",
-      "Bash(sed -n '/FINAL_RESPONSE_PROMPT = /,/\"\"\"$/p' agent.py)"
+      "Bash(sed -n '/FINAL_RESPONSE_PROMPT = /,/\"\"\"$/p' agent.py)",
+      "Bash(\"/Users/bhumiksoni/Personal/Travel Planner/.venv/bin/python\" -m py_compile app.py agent.py)",
+      "Bash(curl -sN -X POST http://127.0.0.1:8000/api/travel/stream -H \"Content-Type: application/json\" -d '{\"message\":\"write me a python script to sort a list\"}' --max-time 90)",
+      "Bash(curl -sN -X POST http://127.0.0.1:8000/api/travel/stream -H \"Content-Type: application/json\" -d '{\"message\":\"plan a 4 day trip to Barcelona\",\"thread_id\":\"stream-test-1\"}' --max-time 120)"
     ]
   }
 }

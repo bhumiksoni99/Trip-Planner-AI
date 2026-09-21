@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ApprovalPause, IntakePause } from "@/lib/api";
 import type { Message } from "@/lib/threads";
+import AgentProgress, { type ProgressState } from "./AgentProgress";
 import IntakeCard from "./IntakeCard";
 import { CheckIcon, CopyIcon, DownloadIcon, RetryIcon } from "./icons";
 import Markdown from "./Markdown";
@@ -11,6 +12,7 @@ type MessageListProps = {
   threadId: string;
   messages: Message[];
   pending: boolean;
+  progress: ProgressState;
   onRetry: () => void;
   onDownload: (content: string) => void;
   pause: IntakePause | ApprovalPause | null;
@@ -25,6 +27,7 @@ export default function MessageList({
   threadId,
   messages,
   pending,
+  progress,
   onRetry,
   onDownload,
   pause,
@@ -63,7 +66,7 @@ export default function MessageList({
         );
       })}
 
-      {pending && <ThinkingMessage />}
+      {pending && <ThinkingMessage progress={progress} />}
       {!pending && pause?.type === "intake" && (
         <IntakeCard pause={pause} onSubmit={onIntakeSubmit} onSkipAll={onIntakeSkip} />
       )}
@@ -207,7 +210,10 @@ function ApprovalCard({
   );
 }
 
-function ThinkingMessage() {
+function ThinkingMessage({ progress }: { progress: ProgressState }) {
+  // The first agent reports in within a second or two; until then there's nothing to list
+  const started = progress.agents.length > 0;
+
   return (
     <div className="flex gap-3 sm:gap-4" aria-live="polite" aria-busy="true">
       <Avatar />
@@ -223,11 +229,16 @@ function ThinkingMessage() {
         <p className="mt-1 text-sm text-muted">
           Searching flights, finding hotels and writing your itinerary. This can take a minute.
         </p>
-        <div aria-hidden className="mt-5 space-y-2.5">
-          <div className="shimmer h-3.5 w-full rounded-md" />
-          <div className="shimmer h-3.5 w-11/12 rounded-md" />
-          <div className="shimmer h-3.5 w-3/5 rounded-md" />
-        </div>
+
+        {started ? (
+          <AgentProgress progress={progress} />
+        ) : (
+          <div aria-hidden className="mt-5 space-y-2.5">
+            <div className="shimmer h-3.5 w-full rounded-md" />
+            <div className="shimmer h-3.5 w-11/12 rounded-md" />
+            <div className="shimmer h-3.5 w-3/5 rounded-md" />
+          </div>
+        )}
       </div>
     </div>
   );

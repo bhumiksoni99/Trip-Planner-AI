@@ -5,12 +5,14 @@ import { flushSync } from "react-dom";
 import {
   requestPlan,
   resumePlan,
+  type AgentProgressEvent,
   type ApprovalPause,
   type IntakePause,
   type PlanResponse,
   type ResumeAnswer,
 } from "@/lib/api";
 import { addMessage, createThread, deleteThread, removeLastMessage, useThreads } from "@/lib/threads";
+import { applyProgress, emptyProgress, type ProgressState } from "./AgentProgress";
 import Composer from "./Composer";
 import EmptyState from "./EmptyState";
 import { MenuIcon, PlusIcon, SidebarIcon } from "./icons";
@@ -31,6 +33,8 @@ export default function ChatApp() {
   const [openLink, setOpenLink] = useState<OpenLink | null>(null);
   // What the backend is waiting on per thread: trip details, or approval of a draft plan
   const [pauses, setPauses] = useState<Record<string, IntakePause | ApprovalPause>>({});
+  // Which agents are running for each thread, as the backend reports them
+  const [progress, setProgress] = useState<Record<string, ProgressState>>({});
 
   const sortedThreads = useMemo(() => [...threads].sort((a, b) => b.updatedAt - a.updatedAt), [threads]);
   const activeThread = threads.find((thread) => thread.id === activeId) ?? null;
@@ -71,10 +75,21 @@ export default function ChatApp() {
     }
   }
 
+  // Each run reports its own agents, so the checklist starts empty and fills as they run
+  function trackProgress(threadId: string) {
+    setProgress((current) => ({ ...current, [threadId]: emptyProgress }));
+
+    return (event: AgentProgressEvent) =>
+      setProgress((current) => ({
+        ...current,
+        [threadId]: applyProgress(current[threadId] ?? emptyProgress, event),
+      }));
+  }
+
   async function ask(threadId: string, text: string) {
     setPending(threadId, true);
     try {
-      applyResult(threadId, await requestPlan(text, threadId));
+      applyResult(threadId, await requestPlan(text, threadId, trackProgress(threadId)));
     } catch (err) {
       const message = err instanceof Error ? err.message : "Something went wrong. Please try again.";
       addMessage(threadId, { role: "assistant", content: message, error: true });
@@ -87,7 +102,7 @@ export default function ChatApp() {
     setPause(threadId, null);
     setPending(threadId, true);
     try {
-      applyResult(threadId, await resumePlan(threadId, answer));
+      applyResult(threadId, await resumePlan(threadId, answer, trackProgress(threadId)));
     } catch (err) {
       const message = err instanceof Error ? err.message : "Something went wrong. Please try again.";
       addMessage(threadId, { role: "assistant", content: message, error: true });
@@ -217,6 +232,7 @@ export default function ChatApp() {
                 threadId={activeThread.id}
                 messages={activeThread.messages}
                 pending={activePending}
+                progress={progress[activeThread.id] ?? emptyProgress}
                 onRetry={retry}
                 onDownload={downloadPdf}
                 pause={pauses[activeThread.id] ?? null}

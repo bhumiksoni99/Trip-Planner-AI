@@ -835,19 +835,18 @@ checkpointer.setup()
 
 travel_graph = graph.compile(checkpointer=checkpointer)
 
-def run_travel_agent(query:str, thread_id:str| None = None):
-    if not thread_id:
-        thread_id = uuid.uuid4().hex
-    
-    config = {
+def _config(thread_id:str):
+    return {
         "configurable": {
             "thread_id": thread_id
         }
     }
 
+
+def _initial_state(query:str):
     # Only this run's bookkeeping is reset. The previous run's trip_request, itinerary and other
     # results stay in the thread's checkpoint, so a follow-up can build on the plan already made.
-    initial_state = {
+    return {
         "messages": [HumanMessage(content=query)],
         "user_query": query,
         "is_refinement": False,
@@ -872,24 +871,90 @@ def run_travel_agent(query:str, thread_id:str| None = None):
         "llm_calls": 0,
     }
 
+
+def run_travel_agent(query:str, thread_id:str| None = None):
+    if not thread_id:
+        thread_id = uuid.uuid4().hex
+
+    config = _config(thread_id)
+
     logger.info("run | thread=%s query=%r", thread_id, preview(query, 80))
-    result = travel_graph.invoke(initial_state, config=config)
+    result = travel_graph.invoke(_initial_state(query), config=config)
 
     return format_result(thread_id, result)
 
 
 def resume_travel_agent(thread_id:str, answer:dict):
     """Answer whatever the run paused on: intake questions, or the approval question."""
-    config = {
-        "configurable": {
-            "thread_id": thread_id
-        }
-    }
+    config = _config(thread_id)
 
     logger.info("resume | thread=%s answer=%s", thread_id, preview(answer, 100))
     result = travel_graph.invoke(Command(resume=answer), config=config)
 
     return format_result(thread_id, result)
+
+
+def stream_travel_agent(query:str, thread_id:str | None = None):
+    """Same as run_travel_agent, but yields a progress event as each agent starts and finishes."""
+    if not thread_id:
+        thread_id = uuid.uuid4().hex
+
+    config = _config(thread_id)
+    logger.info("stream | thread=%s query=%r", thread_id, preview(query, 80))
+
+    yield from _progress_events(
+        travel_graph.stream(_initial_state(query), config=config, stream_mode=["tasks", "updates"]),
+        thread_id,
+        config,
+    )
+
+
+def stream_resume_travel_agent(thread_id:str, answer:dict):
+    """Same as resume_travel_agent, but yields progress events while the rest of the plan runs."""
+    config = _config(thread_id)
+    logger.info("stream resume | thread=%s answer=%s", thread_id, preview(answer, 100))
+
+    yield from _progress_events(
+        travel_graph.stream(Command(resume=answer), config=config, stream_mode=["tasks", "updates"]),
+        thread_id,
+        config,
+    )
+
+
+def _progress_events(stream, thread_id:str, config:dict):
+    """Turn LangGraph's stream into progress events, ending with the plan or the question it paused on."""
+    pause = None
+
+    for mode, chunk in stream:
+        if mode == "tasks":
+            # The event that starts a node carries its input; the one that ends it carries a result
+            if "result" in chunk:
+                yield {"event": "agent_finished", "data": {"agent": chunk.get("name"), "failed": bool(chunk.get("error"))}}
+            else:
+                yield {"event": "agent_started", "data": {"agent": chunk.get("name")}}
+            continue
+
+        interrupts = chunk.get("__interrupt__")
+        if interrupts:
+            pause = interrupts[0].value
+            continue
+
+        # Both the supervisor and the feedback agent choose which specialists run
+        for update in chunk.values():
+            if isinstance(update, dict) and update.get("selected_agents") is not None:
+                yield {"event": "agents_selected", "data": {"agents": update["selected_agents"]}}
+
+    result = format_result(thread_id, travel_graph.get_state(config).values)
+
+    if pause:
+        result = {
+            **result,
+            "pause_type": pause.get("type", "approval") if isinstance(pause, dict) else "approval",
+            "pause_payload": pause,
+            "final_response": "",
+        }
+
+    yield {"event": "done", "data": result}
 
 
 def format_result(thread_id:str, result:dict):
