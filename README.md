@@ -1,4 +1,4 @@
-# TripMate AI
+# Itinera AI
 
 A multi-agent travel planner. You describe a trip in one sentence; a graph of specialist agents
 asks for whatever you left out, searches live flights, weather and hotels, writes a day-by-day
@@ -162,8 +162,8 @@ so the browser never holds an API key.
 ### Docker
 
 ```bash
-docker build -t tripmate-backend backend/
-docker run --env-file .env -p 8000:8000 tripmate-backend
+docker build -t itinera-backend backend/
+docker run --env-file .env -p 8000:8000 itinera-backend
 ```
 
 ---

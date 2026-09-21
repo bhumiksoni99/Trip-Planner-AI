@@ -86,7 +86,7 @@ export default function Composer({ onSubmit, disabled, ref }: ComposerProps) {
           </button>
         </div>
         <p className="mt-2 text-xs text-faint">
-          TripMate can make mistakes. Check flight times and prices before booking.
+          Itinera can make mistakes. Check flight times and prices before booking.
         </p>
       </form>
     </div>

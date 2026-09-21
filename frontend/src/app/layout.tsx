@@ -20,7 +20,7 @@ const instrumentSerif = Instrument_Serif({
 });
 
 export const metadata: Metadata = {
-  title: "TripMate AI",
+  title: "Itinera AI",
   description:
     "Search flights, discover hotels and generate a complete travel itinerary with a multi-agent LangGraph system.",
 };

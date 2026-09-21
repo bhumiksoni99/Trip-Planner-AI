@@ -194,7 +194,7 @@ export default function ChatApp() {
     // Render only this reply into the print view, then open the print dialog ("Save as PDF")
     flushSync(() => setPrintContent({ content, days, hotels, brief, header, costs }));
     const previousTitle = document.title;
-    document.title = activeThread ? `TripMate AI - ${activeThread.title}` : "TripMate AI - Travel Plan";
+    document.title = activeThread ? `Itinera AI - ${activeThread.title}` : "Itinera AI - Travel Plan";
     window.addEventListener("afterprint", () => (document.title = previousTitle), { once: true });
     window.print();
   }

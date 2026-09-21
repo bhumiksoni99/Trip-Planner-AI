@@ -1,6 +1,6 @@
 @import "tailwindcss";
 
-/* Palette from the TripMate v4 design: warm paper, near-black rail, deep slate accent.
+/* Palette from the Itinera v4 design: warm paper, near-black rail, deep slate accent.
    The design is light only, so the app does not follow the OS dark setting. */
 :root {
   color-scheme: light;

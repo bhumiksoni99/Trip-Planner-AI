@@ -40,7 +40,7 @@ export default function Sidebar({
         <div className="flex h-14 items-center justify-between px-5">
           <div className="flex items-center gap-2.5">
             <span className="text-base">✈️</span>
-            <span className="text-[15px] font-semibold tracking-[0.01em] text-sidebar-ink">TripMate</span>
+            <span className="text-[15px] font-semibold tracking-[0.01em] text-sidebar-ink">Itinera</span>
           </div>
           <button type="button" className="icon-btn text-faint hover:bg-sidebar-hover hover:text-sidebar-ink md:hidden" onClick={onCloseMobile} aria-label="Close sidebar">
             <CloseIcon />

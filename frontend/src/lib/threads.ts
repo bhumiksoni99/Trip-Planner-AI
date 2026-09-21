@@ -27,13 +27,20 @@ export type Thread = {
 };
 
 // Threads live in this browser's localStorage; the backend has no endpoint to list them yet
-const STORAGE_KEY = "tripmate:threads";
+const STORAGE_KEY = "itinera:threads";
+// Where threads were saved before the rename; moved to STORAGE_KEY on first load
+const OLD_STORAGE_KEY = "tripmate:threads";
 const NO_THREADS: Thread[] = [];
 const listeners = new Set<() => void>();
 let threads: Thread[] | null = null;
 
 function load(): Thread[] {
   try {
+    const old = localStorage.getItem(OLD_STORAGE_KEY);
+    if (old !== null) {
+      if (localStorage.getItem(STORAGE_KEY) === null) localStorage.setItem(STORAGE_KEY, old);
+      localStorage.removeItem(OLD_STORAGE_KEY);
+    }
     const saved = localStorage.getItem(STORAGE_KEY);
     return saved ? (JSON.parse(saved) as Thread[]) : [];
   } catch {
