@@ -1,17 +1,37 @@
-export type ApprovalRequest = {
+export type ApprovalPause = {
+  type: "approval";
   question: string;
   itinerary: string;
   budget: string;
+};
+
+export type IntakeQuestion = {
+  key: string;
+  question: string;
+  placeholder: string;
+  options: string[];
+  value: string;
+};
+
+export type IntakePause = {
+  type: "intake";
+  intro: string;
+  questions: IntakeQuestion[];
 };
 
 export type PlanResponse = {
   thread_id: string;
   final_response: string;
   llm_calls: number;
-  // Set when the backend paused for approval; the plan arrives after resumePlan()
-  awaiting_approval: boolean;
-  approval_request: ApprovalRequest | null;
+  // Set when the backend paused, either for trip details or for approval; answer it with resumePlan()
+  pause_type: "intake" | "approval" | null;
+  pause_payload: IntakePause | ApprovalPause | null;
 };
+
+export type ResumeAnswer =
+  | { approved: boolean; feedback?: string }
+  | { answers: Record<string, string> }
+  | { skipped: true };
 
 async function readPlan(response: Response): Promise<PlanResponse> {
   const data = await response.json().catch(() => null);
@@ -37,11 +57,29 @@ export async function requestPlan(query: string, threadId: string | null): Promi
   return readPlan(response);
 }
 
-export async function resumePlan(threadId: string, approved: boolean, feedback = ""): Promise<PlanResponse> {
+export type PlacePreview = {
+  images: { url: string; description?: string }[];
+  results: { title: string; url: string; content: string }[];
+};
+
+export async function fetchPlacePreview(query: string): Promise<PlacePreview> {
+  const response = await fetch(`/api/place?q=${encodeURIComponent(query)}`);
+  const data = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    const error =
+      typeof data?.error === "string" ? data.error : typeof data?.detail === "string" ? data.detail : null;
+    throw new Error(error ?? `Couldn't load this place (${response.status}).`);
+  }
+
+  return data.data as PlacePreview;
+}
+
+export async function resumePlan(threadId: string, answer: ResumeAnswer): Promise<PlanResponse> {
   const response = await fetch("/api/approve", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ thread_id: threadId, approved, feedback }),
+    body: JSON.stringify({ thread_id: threadId, ...answer }),
   });
 
   return readPlan(response);

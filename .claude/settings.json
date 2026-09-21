@@ -41,7 +41,9 @@
       "Bash(timeout 240 '/Users/bhumiksoni/Personal/Travel Planner/.venv/bin/python' -c ' *)",
       "Bash(\"/Users/bhumiksoni/Personal/Travel Planner/.venv/bin/python\" -m py_compile agent.py)",
       "Bash(node check_approval.mjs)",
-      "Bash(npm run *)"
+      "Bash(npm run *)",
+      "Bash(sed -n '/ITINERARY_PROMPT = /,/\"\"\"$/p' agent.py)",
+      "Bash(sed -n '/FINAL_RESPONSE_PROMPT = /,/\"\"\"$/p' agent.py)"
     ]
   }
 }

@@ -185,6 +185,11 @@ body {
     animation-delay: 0.3s;
   }
 
+  /* The link sheet slides up from the bottom */
+  .slide-up {
+    animation: slide-up 0.25s ease-out;
+  }
+
   .shimmer {
     background: linear-gradient(
       90deg,
@@ -371,6 +376,15 @@ body {
   }
 }
 
+@keyframes slide-up {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
 @keyframes shimmer {
   from {
     background-position: 200% 0;
@@ -382,7 +396,8 @@ body {
 
 @media (prefers-reduced-motion: reduce) {
   .thinking-dot,
-  .shimmer {
+  .shimmer,
+  .slide-up {
     animation: none;
   }
 }

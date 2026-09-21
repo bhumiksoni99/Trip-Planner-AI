@@ -48,6 +48,7 @@ class TravelState(TypedDict, total=False):
     trip_request: str        # the last full trip description, kept across follow-ups
     plan_history: list[str]  # the plans finished so far in this thread, newest last
     is_refinement: bool      # this message changes the existing plan instead of starting a new trip
+    intake_done: bool        # the trip details have been collected for this trip
 
     # Supervisor + guardrail state
     guardrail_allowed: bool
@@ -92,6 +93,14 @@ class ReplanPlan(BaseModel):
     agents: list[str] = Field(description="Agents whose data must change to address the feedback; empty when the write-up alone can handle it")
     reasoning: str = Field(description="One short sentence explaining the choice")
 
+class TripConstraints(BaseModel):
+    departure_city: str | None = Field(description="City or airport the traveller leaves from, null if not stated")
+    travel_dates: str | None = Field(description="When the trip happens, e.g. 'mid-May' or '3-9 March', null if not stated")
+    duration: str | None = Field(description="How long the trip is, e.g. '5 days', null if not stated")
+    budget: str | None = Field(description="Budget for the trip, with its currency, null if not stated")
+    vibe: str | None = Field(description="Style of trip, e.g. relaxed, adventurous, luxury, null if not stated")
+    interests: str | None = Field(description="Must-do interests or things to avoid, null if not stated")
+
 class Destination(BaseModel):
     city: str | None = Field(description="Main destination city of the trip")
 
@@ -109,6 +118,8 @@ guardrail_checker = llm.with_structured_output(Guardrail)
 agent_selector = llm.with_structured_output(AgentPlan)
 replan_selector = llm.with_structured_output(ReplanPlan)
 intent_classifier = llm.with_structured_output(MessageIntent)
+constraints_extractor = llm.with_structured_output(TripConstraints)
+
 
 # The specialists in the order they run; the supervisor picks a subset of these
 AGENT_ORDER = ["flight_agent", "weather_agent", "itinerary_agent", "hotel_agent", "budget_agent"]
@@ -118,6 +129,47 @@ MAX_STAYS = 5
 
 # Used when the request names only a destination, e.g. "Plan a Japan trip"
 DEFAULT_ORIGIN = os.getenv("DEFAULT_ORIGIN", "DEL")
+DEFAULT_ORIGIN_CITY = os.getenv("DEFAULT_ORIGIN_CITY", "Delhi")
+
+# Asked one at a time before planning starts, but only the ones the request didn't already answer
+INTAKE_FIELDS = [
+    {
+        "key": "departure_city",
+        "question": "Where are you travelling from?",
+        "placeholder": f"e.g. {DEFAULT_ORIGIN_CITY}",
+        "options": [DEFAULT_ORIGIN_CITY, "Mumbai", "Bengaluru", "Hyderabad"],
+    },
+    {
+        "key": "travel_dates",
+        "question": "When are you going?",
+        "placeholder": "e.g. mid-May, or 3-9 March",
+        "options": ["Next month", "In 2-3 months", "Later this year", "Dates are flexible"],
+    },
+    {
+        "key": "duration",
+        "question": "How long is the trip?",
+        "placeholder": "e.g. 5 days",
+        "options": ["A weekend", "5 days", "1 week", "2 weeks"],
+    },
+    {
+        "key": "budget",
+        "question": "What's your budget per person?",
+        "placeholder": "e.g. 1.5 lakhs per person",
+        "options": ["Under 50k", "50k - 1 lakh", "1 - 2 lakhs", "2 lakhs+"],
+    },
+    {
+        "key": "vibe",
+        "question": "What kind of trip do you want?",
+        "placeholder": "e.g. relaxed, adventurous, luxury",
+        "options": ["Relaxed", "Adventurous", "Culture and history", "Nightlife", "Luxury"],
+    },
+    {
+        "key": "interests",
+        "question": "Anything you must do, or want to avoid?",
+        "placeholder": "e.g. street food, no museums",
+        "options": ["Street food", "Museums and art", "Nature and hikes", "Shopping", "Beaches"],
+    },
+]
 
 # Pause at hil_agent for approval before the write-up. Off until the UI can answer it.
 REQUIRE_APPROVAL = os.getenv("REQUIRE_APPROVAL", "true").lower() == "true"
@@ -298,11 +350,81 @@ def route_after_supervisor(state:TravelState):
     if state.get("is_refinement"):
         return "feedback_agent"
 
-    return route_next(state)
+    # A new trip collects its missing details first
+    return "intake_agent"
+
+
+def intake_agent(state:TravelState):
+    """Ask the traveller for the trip details their request didn't mention, before any planning starts"""
+    # Follow-ups refine an existing plan, so they never get asked
+    if state.get("is_refinement") or state.get("intake_done"):
+        return {"intake_done": True}
+
+    trip_request = state.get("trip_request") or state["user_query"]
+
+    found = constraints_extractor.invoke(
+        "Pull the trip details out of this travel request. Use null for anything it doesn't say; never guess.\n\n"
+        f"Request: {trip_request}"
+    )
+    constraints = {field["key"]: (getattr(found, field["key"], None) or "").strip() for field in INTAKE_FIELDS} if found else {}
+
+    missing = [field for field in INTAKE_FIELDS if not constraints.get(field["key"])]
+
+    if not missing:
+        logger.info("intake_agent | nothing to ask, all details given")
+        return {
+            "trip_constraints": constraints,
+            "intake_done": True,
+            "llm_calls": state["llm_calls"]+1
+        }
+
+    logger.info("intake_agent | asking for %s", [field["key"] for field in missing])
+
+    # Raises GraphInterrupt the first time; on resume it returns the answers the traveller gave
+    answers = interrupt({
+        "type": "intake",
+        "intro": "A few details first, so the plan fits your trip.",
+        "questions": [{**field, "value": constraints.get(field["key"], "")} for field in missing],
+    })
+
+    if isinstance(answers, dict) and not answers.get("skipped"):
+        for field in INTAKE_FIELDS:
+            answer = str(answers.get(field["key"], "") or "").strip()
+            if answer:
+                constraints[field["key"]] = answer
+
+    logger.info("intake_agent | answered: %s", {k: v for k, v in constraints.items() if v})
+
+    return {
+        "trip_constraints": constraints,
+        "intake_done": True,
+        "messages": [
+            AIMessage(content="Trip details noted"),
+        ],
+        "llm_calls": state["llm_calls"]+1
+    }
+
+
+def constraints_text(state:TravelState):
+    """The traveller's stated trip details, as a prompt block, or empty when there are none"""
+    constraints = state.get("trip_constraints") or {}
+    lines = [
+        f"- {field['question'].rstrip('?')}: {constraints[field['key']]}"
+        for field in INTAKE_FIELDS
+        if constraints.get(field["key"])
+    ]
+
+    if not lines:
+        return ""
+
+    return "\n\nTrip details the traveller gave:\n" + "\n".join(lines)
 
 
 def flight_agent(state:TravelState):
     user_query = state.get("trip_request") or state["user_query"]
+    departure_city = (state.get("trip_constraints") or {}).get("departure_city")
+    if departure_city:
+        user_query = f"{user_query} departing from {departure_city}"
 
     # The MCP list_routes tool needs a paid AviationStack plan, so this calls /flights directly.
     # search_flights works out the airports itself, with its own LLM call.
@@ -346,7 +468,7 @@ def weather_agent(state:TravelState):
 
 def hotel_agent(state:TravelState):
     user_query = state.get("trip_request") or state["user_query"]
-    itinerary = state["itinerary"]
+    itinerary = state.get("itinerary", "")
 
     result = stay_extractor.invoke(
         "List every place the traveller stays overnight in this itinerary, in trip order.\n\n"
@@ -394,8 +516,8 @@ def hotel_agent(state:TravelState):
 
 def itinerary_agent(state:TravelState):
     user_query = state.get("trip_request") or state["user_query"]
-    flight_data = state["flight_results"]
-    weather_data = state["weather_results"]
+    flight_data = state.get("flight_results", "")
+    weather_data = state.get("weather_results", "")
     human_feedback = state.get("human_feedback", "") if not state.get("approved") else ""
     feedback_history = state.get("feedback_history", []) if human_feedback else []
     previous_itinerary = state.get("itinerary", "") if human_feedback else ""
@@ -403,6 +525,8 @@ def itinerary_agent(state:TravelState):
     ITINERARY_PROMPT = """You are a travel planner. Using the user's request and the flight and weather data below, write a day-by-day travel itinerary in Markdown.
 When a previous version and feedback are given, revise that version: change what the feedback asks for, follow every earlier round of feedback too, and leave the rest of the plan as it was.
 For each city, say which area to stay in and for how many nights, but don't name specific hotels; those are searched separately.
+Make every place worth visiting a Markdown link to a Google search, like [Sagrada Familia](https://www.google.com/search?q=Sagrada+Familia+Barcelona): keep the place's own name as the link text, and put the place and its city in the query with spaces as +. Link each place the first time it appears, not every time.
+Never put brackets or parentheses inside a link's url, as they break the link: drop them from the query, so "Casa Mila (La Pedrera)" becomes query=Casa+Mila,+Barcelona.
 Plan around the weather: put outdoor activities on the clearer days and indoor ones on wet days, and say when you do so.
 The forecast only covers the next few days, so ignore it if the trip starts later.
 Use only the flights in the data; don't make any up. If the user didn't give trip length or budget, pick sensible defaults and say so.
@@ -416,7 +540,7 @@ Flight data:
 {flight_data}
 
 Weather data:
-{weather_data}"""
+{weather_data}""" + constraints_text(state)
 
     if previous_itinerary:
         trip_details += f"""
@@ -450,9 +574,9 @@ Traveller's feedback so far, most recent last:
 def budget_agent(state:TravelState):
     """Analyze whether the planned trip fits the user's budget"""
     user_query = state.get("trip_request") or state["user_query"]
-    flight_data = state["flight_results"]
-    hotels_data = state["hotel_results"]
-    itinerary = state["itinerary"]
+    flight_data = state.get("flight_results", "")
+    hotels_data = state.get("hotel_results", "")
+    itinerary = state.get("itinerary", "")
 
     BUDGET_PROMPT = """You are a travel budget analyst. Work out roughly what the planned trip costs and whether it fits the traveller's budget.
 Break the cost down by flights, accommodation, food, local transport and activities, and give a total range per person.
@@ -471,7 +595,7 @@ Hotel data:
 {hotels_data}
 
 Itinerary:
-{itinerary}"""
+{itinerary}""" + constraints_text(state)
 
     response = llm.invoke([
         SystemMessage(content=BUDGET_PROMPT),
@@ -490,7 +614,7 @@ Itinerary:
 
 def hil_agent(state:TravelState):
     """Pause so the traveller can approve the plan, or send it back with feedback"""
-    itinerary = state["itinerary"]
+    itinerary = state.get("itinerary", "")
     budget_data = state.get("budget_results", "")
 
     approval_request = (
@@ -503,6 +627,7 @@ def hil_agent(state:TravelState):
 
     # Raises GraphInterrupt the first time; on resume it returns whatever Command(resume=...) carried
     answer = interrupt({
+        "type": "approval",
         "question": "Approve this travel plan?",
         "itinerary": itinerary,
         "budget": budget_data,
@@ -597,16 +722,18 @@ def route_after_feedback(state:TravelState):
 
 def final_response_agent(state:TravelState):
     user_query = state.get("trip_request") or state["user_query"]
-    flight_data = state["flight_results"]
-    hotels_data = state["hotel_results"]
-    weather_data = state["weather_results"]
-    itinerary = state["itinerary"]
+    flight_data = state.get("flight_results", "")
+    hotels_data = state.get("hotel_results", "")
+    weather_data = state.get("weather_results", "")
+    itinerary = state.get("itinerary", "")
     budget_data = state.get("budget_results", "")
     human_feedback = state.get("human_feedback", "") if not state.get("approved") else ""
 
     FINAL_RESPONSE_PROMPT = """You are a travel planner. Combine the user's request, flight data, hotel data, weather data, budget analysis and itinerary below into one clear, well-formatted travel plan in Markdown.
 Use these sections: Trip Overview, Flights, Hotels, Weather, Day-by-Day Itinerary, Estimated Budget, Travel Tips. Use headings, bullet points and tables where they help.
-In the Hotels section, group the hotels by each stay in the itinerary.
+In the Hotels section, group the hotels by each stay in the itinerary, and make each hotel name a Markdown link to its url from the hotel data. Skip the link when the data has no url for it; never invent one.
+Keep the Google search links the itinerary already has, and add one for any place that is missing it, like [Sagrada Familia](https://www.google.com/search?q=Sagrada+Familia+Barcelona), with spaces as + in the query.
+Never put brackets or parentheses inside a link's url, as they break the link: drop them from the query, so "Casa Mila (La Pedrera)" becomes query=Casa+Mila,+Barcelona.
 In the Weather section, give the current conditions and the daily forecast from the weather data, and say that the forecast covers only the next few days.
 In the Estimated Budget section, use the budget analysis when there is one, keeping its figures and its verdict on whether the trip fits the budget.
 When the traveller has given feedback, rework the plan to follow it and say at the top what you changed. Their feedback outweighs the itinerary above.
@@ -629,7 +756,7 @@ Budget analysis:
 {budget_data}
 
 Itinerary:
-{itinerary}"""
+{itinerary}""" + constraints_text(state)
 
     if human_feedback:
         trip_details += f"""
@@ -663,6 +790,7 @@ Traveller's feedback on the plan:
 graph = StateGraph(TravelState)
 
 graph.add_node("supervisor_agent", supervisor_agent)
+graph.add_node("intake_agent", intake_agent)
 graph.add_node("flight_agent", flight_agent)
 graph.add_node("hotel_agent", hotel_agent)
 graph.add_node("weather_agent",weather_agent)
@@ -677,8 +805,11 @@ graph.add_edge(START, "supervisor_agent")
 graph.add_conditional_edges(
     "supervisor_agent",
     route_after_supervisor,
-    [*AGENT_ORDER, "feedback_agent", "hil_agent", "final_response_agent", END],
+    ["intake_agent", "feedback_agent", END],
 )
+
+# Planning starts once the trip details are in
+graph.add_conditional_edges("intake_agent", route_next, [*AGENT_ORDER, "hil_agent", "final_response_agent"])
 
 # Each specialist hands over to the next one the supervisor picked, skipping the rest
 for agent_name in AGENT_ORDER:
@@ -720,6 +851,7 @@ def run_travel_agent(query:str, thread_id:str| None = None):
         "messages": [HumanMessage(content=query)],
         "user_query": query,
         "is_refinement": False,
+        "intake_done": False,
 
         # Supervisor + guardrail state
         "guardrail_allowed": False,
@@ -746,19 +878,16 @@ def run_travel_agent(query:str, thread_id:str| None = None):
     return format_result(thread_id, result)
 
 
-def resume_travel_agent(thread_id:str, approved:bool = True, feedback:str = ""):
-    """Answer the approval question hil_agent asked, and let the run finish."""
+def resume_travel_agent(thread_id:str, answer:dict):
+    """Answer whatever the run paused on: intake questions, or the approval question."""
     config = {
         "configurable": {
             "thread_id": thread_id
         }
     }
 
-    logger.info("resume | thread=%s approved=%s feedback=%r", thread_id, approved, preview(feedback, 60))
-    result = travel_graph.invoke(
-        Command(resume={"approved": approved, "feedback": feedback}),
-        config=config,
-    )
+    logger.info("resume | thread=%s answer=%s", thread_id, preview(answer, 100))
+    result = travel_graph.invoke(Command(resume=answer), config=config)
 
     return format_result(thread_id, result)
 
@@ -766,20 +895,21 @@ def resume_travel_agent(thread_id:str, approved:bool = True, feedback:str = ""):
 def format_result(thread_id:str, result:dict):
     interrupts = result.get("__interrupt__")
 
-    # The run paused at hil_agent; resume it with resume_travel_agent(thread_id, ...)
+    # The run paused at intake_agent or hil_agent; answer it with resume_travel_agent(thread_id, ...)
     if interrupts:
+        payload = interrupts[0].value
         return {
             "thread_id": thread_id,
-            "awaiting_approval": True,
-            "approval_request": interrupts[0].value,
+            "pause_type": payload.get("type", "approval") if isinstance(payload, dict) else "approval",
+            "pause_payload": payload,
             "final_response": "",
             "llm_calls": result.get("llm_calls", 0),
         }
 
     return {
         "thread_id": thread_id,
-        "awaiting_approval": False,
-        "approval_request": None,
+        "pause_type": None,
+        "pause_payload": None,
         "final_response": result.get("final_response", ""),
         "llm_calls": result.get("llm_calls", 0),
     }

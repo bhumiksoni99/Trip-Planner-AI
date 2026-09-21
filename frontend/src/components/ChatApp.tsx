@@ -2,12 +2,20 @@
 
 import { useMemo, useState } from "react";
 import { flushSync } from "react-dom";
-import { requestPlan, resumePlan, type ApprovalRequest, type PlanResponse } from "@/lib/api";
+import {
+  requestPlan,
+  resumePlan,
+  type ApprovalPause,
+  type IntakePause,
+  type PlanResponse,
+  type ResumeAnswer,
+} from "@/lib/api";
 import { addMessage, createThread, deleteThread, removeLastMessage, useThreads } from "@/lib/threads";
 import Composer from "./Composer";
 import EmptyState from "./EmptyState";
 import { MenuIcon, PlusIcon, SidebarIcon } from "./icons";
 import Markdown from "./Markdown";
+import LinkPanel, { type OpenLink } from "./LinkPanel";
 import MessageList from "./MessageList";
 import Sidebar from "./Sidebar";
 
@@ -19,8 +27,10 @@ export default function ChatApp() {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [printContent, setPrintContent] = useState<string | null>(null);
-  // Draft plans the backend paused on, waiting to be approved, keyed by thread
-  const [approvals, setApprovals] = useState<Record<string, ApprovalRequest>>({});
+  // A link from a plan, shown beside the chat instead of navigating away
+  const [openLink, setOpenLink] = useState<OpenLink | null>(null);
+  // What the backend is waiting on per thread: trip details, or approval of a draft plan
+  const [pauses, setPauses] = useState<Record<string, IntakePause | ApprovalPause>>({});
 
   const sortedThreads = useMemo(() => [...threads].sort((a, b) => b.updatedAt - a.updatedAt), [threads]);
   const activeThread = threads.find((thread) => thread.id === activeId) ?? null;
@@ -35,24 +45,27 @@ export default function ChatApp() {
     });
   }
 
-  function setApproval(threadId: string, approval: ApprovalRequest | null) {
-    setApprovals((current) => {
+  function setPause(threadId: string, pause: IntakePause | ApprovalPause | null) {
+    setPauses((current) => {
       const next = { ...current };
-      if (approval) next[threadId] = approval;
+      if (pause) next[threadId] = pause;
       else delete next[threadId];
       return next;
     });
   }
 
-  // A paused run shows its draft plus the approval card; a finished one shows the plan
+  // A paused run shows its card: trip details to fill in, or a draft plan to approve
   function applyResult(threadId: string, result: PlanResponse) {
-    if (result.awaiting_approval && result.approval_request) {
-      const { itinerary, budget } = result.approval_request;
+    const pause = result.pause_payload;
+
+    if (pause?.type === "approval") {
       addMessage(threadId, {
         role: "assistant",
-        content: [itinerary, budget].filter(Boolean).join("\n\n") || "Here is the plan so far.",
+        content: [pause.itinerary, pause.budget].filter(Boolean).join("\n\n") || "Here is the plan so far.",
       });
-      setApproval(threadId, result.approval_request);
+      setPause(threadId, pause);
+    } else if (pause?.type === "intake") {
+      setPause(threadId, pause);
     } else {
       addMessage(threadId, { role: "assistant", content: result.final_response });
     }
@@ -70,11 +83,11 @@ export default function ChatApp() {
     }
   }
 
-  async function answerApproval(threadId: string, approved: boolean, feedback = "") {
-    setApproval(threadId, null);
+  async function answerPause(threadId: string, answer: ResumeAnswer) {
+    setPause(threadId, null);
     setPending(threadId, true);
     try {
-      applyResult(threadId, await resumePlan(threadId, approved, feedback));
+      applyResult(threadId, await resumePlan(threadId, answer));
     } catch (err) {
       const message = err instanceof Error ? err.message : "Something went wrong. Please try again.";
       addMessage(threadId, { role: "assistant", content: message, error: true });
@@ -85,7 +98,16 @@ export default function ChatApp() {
 
   function requestChanges(threadId: string, feedback: string) {
     addMessage(threadId, { role: "user", content: feedback });
-    void answerApproval(threadId, false, feedback);
+    void answerPause(threadId, { approved: false, feedback });
+  }
+
+  function submitIntake(threadId: string, answers: Record<string, string>) {
+    const filled = Object.entries(answers).filter(([, value]) => value.trim());
+    addMessage(threadId, {
+      role: "user",
+      content: filled.map(([key, value]) => `${key.replace(/_/g, " ")}: ${value.trim()}`).join("\n"),
+    });
+    void answerPause(threadId, { answers: Object.fromEntries(filled) });
   }
 
   function send(text: string) {
@@ -197,9 +219,12 @@ export default function ChatApp() {
                 pending={activePending}
                 onRetry={retry}
                 onDownload={downloadPdf}
-                awaitingApproval={Boolean(approvals[activeThread.id])}
-                onApprove={() => void answerApproval(activeThread.id, true)}
+                pause={pauses[activeThread.id] ?? null}
+                onApprove={() => void answerPause(activeThread.id, { approved: true })}
                 onRequestChanges={(feedback) => requestChanges(activeThread.id, feedback)}
+                onIntakeSubmit={(answers) => submitIntake(activeThread.id, answers)}
+                onIntakeSkip={() => void answerPause(activeThread.id, { skipped: true })}
+                onLinkClick={(href, label) => setOpenLink({ href, label })}
               />
             ) : (
               <EmptyState onPick={send} />
@@ -208,6 +233,8 @@ export default function ChatApp() {
 
           <Composer value={draft} onChange={setDraft} onSubmit={() => send(draft)} disabled={activePending} />
         </div>
+
+        {openLink && <LinkPanel key={openLink.href} link={openLink} onClose={() => setOpenLink(null)} />}
       </div>
 
       {printContent && (

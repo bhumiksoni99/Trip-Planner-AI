@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import type { ApprovalPause, IntakePause } from "@/lib/api";
 import type { Message } from "@/lib/threads";
+import IntakeCard from "./IntakeCard";
 import { CheckIcon, CopyIcon, DownloadIcon, RetryIcon } from "./icons";
 import Markdown from "./Markdown";
 
@@ -11,9 +13,12 @@ type MessageListProps = {
   pending: boolean;
   onRetry: () => void;
   onDownload: (content: string) => void;
-  awaitingApproval: boolean;
+  pause: IntakePause | ApprovalPause | null;
   onApprove: () => void;
   onRequestChanges: (feedback: string) => void;
+  onIntakeSubmit: (answers: Record<string, string>) => void;
+  onIntakeSkip: () => void;
+  onLinkClick: (href: string, label: string) => void;
 };
 
 export default function MessageList({
@@ -22,21 +27,24 @@ export default function MessageList({
   pending,
   onRetry,
   onDownload,
-  awaitingApproval,
+  pause,
   onApprove,
   onRequestChanges,
+  onIntakeSubmit,
+  onIntakeSkip,
+  onLinkClick,
 }: MessageListProps) {
   const lastMessageRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
 
   // Keep the thinking indicator or approval card in view; otherwise show the start of the latest message
   useEffect(() => {
-    if (pending || awaitingApproval) {
+    if (pending || pause) {
       endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
     } else {
       lastMessageRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
     }
-  }, [threadId, messages.length, pending, awaitingApproval]);
+  }, [threadId, messages.length, pending, pause]);
 
   return (
     <div className="mx-auto w-full max-w-3xl space-y-8 px-4 pt-6 pb-10 sm:px-6">
@@ -49,14 +57,17 @@ export default function MessageList({
             ) : message.error ? (
               <ErrorMessage content={message.content} onRetry={isLast && !pending ? onRetry : undefined} />
             ) : (
-              <AssistantMessage content={message.content} onDownload={onDownload} />
+              <AssistantMessage content={message.content} onDownload={onDownload} onLinkClick={onLinkClick} />
             )}
           </div>
         );
       })}
 
       {pending && <ThinkingMessage />}
-      {awaitingApproval && !pending && (
+      {!pending && pause?.type === "intake" && (
+        <IntakeCard pause={pause} onSubmit={onIntakeSubmit} onSkipAll={onIntakeSkip} />
+      )}
+      {!pending && pause?.type === "approval" && (
         <ApprovalCard onApprove={onApprove} onRequestChanges={onRequestChanges} />
       )}
       <div ref={endRef} />
@@ -78,12 +89,20 @@ function UserMessage({ content }: { content: string }) {
   );
 }
 
-function AssistantMessage({ content, onDownload }: { content: string; onDownload: (content: string) => void }) {
+function AssistantMessage({
+  content,
+  onDownload,
+  onLinkClick,
+}: {
+  content: string;
+  onDownload: (content: string) => void;
+  onLinkClick: (href: string, label: string) => void;
+}) {
   return (
     <div className="flex gap-3 sm:gap-4">
       <Avatar />
       <div className="min-w-0 flex-1 pt-0.5">
-        <Markdown content={content} />
+        <Markdown content={content} onLinkClick={onLinkClick} />
         <div className="mt-4 -ml-2 flex flex-wrap gap-1">
           <CopyButton text={content} />
           <button type="button" className="action-btn" onClick={() => onDownload(content)}>
