@@ -23,6 +23,9 @@
   --accent-2: #183140;
   --accent-soft: #9fb6c0;
   --on-accent: #f6f4ef;
+  /* Amber, for terms the planner assumed rather than the traveller stating them */
+  --assumed: #fbf3e4;
+  --assumed-ink: #8a6a2f;
   --composer-shadow: 0 10px 32px -18px rgb(20 22 26 / 0.35);
   --radius: 2px;
 }
@@ -46,6 +49,8 @@
   --color-accent: var(--accent);
   --color-accent-soft: var(--accent-soft);
   --color-on-accent: var(--on-accent);
+  --color-assumed: var(--assumed);
+  --color-assumed-ink: var(--assumed-ink);
   --radius-sharp: var(--radius);
   --font-sans: var(--font-instrument-sans);
   --font-mono: var(--font-geist-mono);
@@ -234,6 +239,16 @@ body {
     margin-top: 0;
   }
 
+  /* One activity inside a day row: body text, no paragraph spacing */
+  .plan-content.day-item {
+    font-size: 0.875rem;
+    line-height: 1.55;
+  }
+
+  .plan-content.day-item p {
+    margin: 0;
+  }
+
   .plan-content > :last-child {
     margin-bottom: 0;
   }
@@ -258,6 +273,12 @@ body {
   .plan-content h1 + h2 {
     padding-top: 0;
     border-top: 0;
+  }
+
+  /* The half of the write-up that follows the day plan, so its first heading keeps the divider */
+  .plan-content.continues > h2:first-child {
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--line);
   }
 
   .plan-content h3 {

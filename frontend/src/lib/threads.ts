@@ -1,10 +1,21 @@
 import { useSyncExternalStore } from "react";
+import type { BriefTerm, PlanCosts, PlanDay, PlanHeader, PlanHotel } from "./api";
 
 export type Message = {
   id: string;
   role: "user" | "assistant";
   content: string;
   error?: boolean;
+  // The day-by-day plan, rendered as cards above the write-up. Missing on replies made before this existed
+  days?: PlanDay[];
+  // The shortlisted hotels, rendered as cards in the Hotels section
+  hotels?: PlanHotel[];
+  // The cost breakdown, rendered as a table in the budget section
+  costs?: PlanCosts | null;
+  // The plan's title card, shown under the brief
+  header?: PlanHeader | null;
+  // The terms the plan was made against, shown as a strip at the top of the reply
+  brief?: BriefTerm[];
 };
 
 export type Thread = {

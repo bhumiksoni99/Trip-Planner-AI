@@ -5,9 +5,11 @@ type MarkdownProps = {
   content: string;
   // Given, links open in the side panel instead of a new tab
   onLinkClick?: (href: string, label: string) => void;
+  // An extra class for places that need tighter type than a full write-up, like a day's activities
+  className?: string;
 };
 
-export default function Markdown({ content, onLinkClick }: MarkdownProps) {
+export default function Markdown({ content, onLinkClick, className }: MarkdownProps) {
   const components: Components = {
     a: ({ href, children }) => (
       <a
@@ -32,7 +34,7 @@ export default function Markdown({ content, onLinkClick }: MarkdownProps) {
   };
 
   return (
-    <div className="plan-content">
+    <div className={className ? `plan-content ${className}` : "plan-content"}>
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
         {content}
       </ReactMarkdown>

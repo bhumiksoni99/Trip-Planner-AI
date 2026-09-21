@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 from typing import TypedDict, Annotated, Any
 import uuid
+import requests
 import operator
 from functools import partial
 import psycopg
@@ -15,6 +16,7 @@ from langgraph.types import interrupt, Command
 from langgraph.checkpoint.postgres import PostgresSaver
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, AnyMessage
 from mcp_client import tavily_search, run_sync, get_weather
+from place_preview import search_place
 from tools.flight_tool import search_flights
 
 load_dotenv()
@@ -55,6 +57,8 @@ class TravelState(TypedDict, total=False):
     guardrail_reason: str
     selected_agents: list[str]
     trip_constraints: dict[str, Any]
+    # Which of the trip's details the planner filled in because the traveller never said
+    assumed_constraints: list[str]
     supervisor_reasoning: str
 
     # Original specialist results
@@ -62,9 +66,15 @@ class TravelState(TypedDict, total=False):
     hotel_results: str
     weather_results: str
     itinerary: str
+    # The same day-by-day plan the itinerary Markdown was built from, for the UI to render as cards
+    itinerary_days: list[dict]
+    # The shortlisted hotels, with their links, for the UI to render as cards
+    hotel_picks: list[dict]
 
     # New budget + HITL state
     budget_results: str
+    budget_total: str         # the estimated total per person, for the plan's header card
+    budget_costs: dict[str, Any]  # the cost table: its lines, total and share of a stated budget
     approval_request: str
     approved: bool
     human_feedback: str
@@ -72,6 +82,8 @@ class TravelState(TypedDict, total=False):
     revision_count: int
     replan_reasoning: str
     final_response: str
+    plan_summary: str        # one-line synopsis for the header card
+    destination_image: str   # a photo of the destination for the header card
 
     llm_calls: int
 
@@ -94,6 +106,8 @@ class ReplanPlan(BaseModel):
     reasoning: str = Field(description="One short sentence explaining the choice")
 
 class TripConstraints(BaseModel):
+    # Not one of the intake questions: it comes from the request itself, and titles the plan
+    destination: str | None = Field(description="Where the trip goes: the city, or the country if no city is named")
     departure_city: str | None = Field(description="City or airport the traveller leaves from, null if not stated")
     travel_dates: str | None = Field(description="When the trip happens, e.g. 'mid-May' or '3-9 March', null if not stated")
     duration: str | None = Field(description="How long the trip is, e.g. '5 days', null if not stated")
@@ -112,7 +126,82 @@ class Stay(BaseModel):
 class Stays(BaseModel):
     stays: list[Stay] = Field(description="Every place the traveller stays overnight, in trip order")
 
+class HotelPick(BaseModel):
+    name: str = Field(description="The hotel's name, as its search result gives it")
+    url: str = Field(description="The hotel's link, copied exactly from its search result. Never write one yourself")
+    why: str = Field(
+        description="One or two complete sentences, in your own words, on why this hotel suits this stay: where it "
+                    "is and what it is good for. Never copy a cut-off fragment from the search result"
+    )
+
+class StayHotels(BaseModel):
+    stay_index: int = Field(description="Which numbered stay these hotels are for")
+    hotels: list[HotelPick] = Field(description="The best hotels for that stay")
+
+class HotelShortlist(BaseModel):
+    stays: list[StayHotels] = Field(description="Hotels for every stay, in the order the stays were given")
+
+class FinalPlan(BaseModel):
+    summary: str = Field(
+        description="One or two sentences on what makes this plan work: its length, whether it fits the budget, "
+                    "and the one or two choices that shaped it. Like 'Five days, comfortably under budget. A "
+                    "Downtown base within walking distance of your evenings, and one day kept deliberately light.'"
+    )
+    plan: str = Field(description="The full travel plan in Markdown, with all of its sections")
+
+class CostLine(BaseModel):
+    label: str = Field(description='What the cost covers, like "Flights" or "Stay · Downtown · 13 nights"')
+    amount: str = Field(description="What that line costs, with its currency, like 'Rs 50,000 - 80,000'")
+    note: str | None = Field(description="A few words on how the figure was reached, or null")
+
+class BudgetEstimate(BaseModel):
+    lines: list[CostLine] = Field(
+        description="The cost broken down, one line each for flights, accommodation, food, local transport "
+                    "and activities"
+    )
+    total: str | None = Field(
+        description="The estimated total per person, as a short range with its currency, like "
+                    "'Rs 1,20,000 - 1,45,000'. Null when no figure could be estimated"
+    )
+    total_value: int | None = Field(
+        description="The middle of that total estimate as a plain number, with no currency or separators, "
+                    "like 132500. Null when there is no total"
+    )
+    ceiling_value: int | None = Field(
+        description="The budget the traveller actually stated, as a plain number with no currency or "
+                    "separators. Null when they gave no budget, and never a figure you worked out yourself"
+    )
+    ceiling_label: str | None = Field(description="The traveller's stated budget with its currency, or null")
+    analysis: str = Field(
+        description="The verdict in Markdown: whether the trip fits the budget and what to cut if it doesn't. "
+                    "A short paragraph, not the breakdown, which is listed separately"
+    )
+
+class DayItem(BaseModel):
+    time: str = Field(description='When it happens: a clock time like "09:00", or "Morning", "Afternoon" or "Evening"')
+    text: str = Field(
+        description="What the traveller does, in one sentence. Every place worth visiting in it is written as a "
+                    "Markdown link to a Google search, like "
+                    "[Pena Palace](https://www.google.com/search?q=Pena+Palace,+Sintra)"
+    )
+
+class ItineraryDay(BaseModel):
+    label: str = Field(description='Which day of the trip, like "Day 1"')
+    heading: str = Field(description='At most three words naming the day, like "Alfama" or "Arrival in Tokyo"')
+    items: list[DayItem] = Field(description="What happens that day, in order")
+
+class Itinerary(BaseModel):
+    overview: str = Field(
+        description="A short paragraph on the shape of the trip: which area to stay in and for how many nights in "
+                    "each city, and any defaults chosen because the traveller didn't say"
+    )
+    days: list[ItineraryDay] = Field(description="The day-by-day plan, in order")
+
 stay_extractor = llm.with_structured_output(Stays)
+itinerary_writer = llm.with_structured_output(Itinerary)
+hotel_picker = llm.with_structured_output(HotelShortlist)
+budget_writer = llm.with_structured_output(BudgetEstimate)
+final_plan_writer = llm.with_structured_output(FinalPlan)
 destination_extractor = llm.with_structured_output(Destination)
 guardrail_checker = llm.with_structured_output(Guardrail)
 agent_selector = llm.with_structured_output(AgentPlan)
@@ -127,6 +216,12 @@ AGENT_ORDER = ["flight_agent", "weather_agent", "itinerary_agent", "hotel_agent"
 # Caps the hotel searches per trip, one search per stay
 MAX_STAYS = 5
 
+# How many hotels are shortlisted for each city the itinerary stays in
+HOTELS_PER_CITY = 2
+
+# Their previews are watermarked, so a header photo from one of these looks broken
+STOCK_PHOTO_HOSTS = ("istockphoto", "gettyimages", "shutterstock", "alamy", "dreamstime", "depositphotos", "123rf")
+
 # Used when the request names only a destination, e.g. "Plan a Japan trip"
 DEFAULT_ORIGIN = os.getenv("DEFAULT_ORIGIN", "DEL")
 DEFAULT_ORIGIN_CITY = os.getenv("DEFAULT_ORIGIN_CITY", "Delhi")
@@ -135,44 +230,62 @@ DEFAULT_ORIGIN_CITY = os.getenv("DEFAULT_ORIGIN_CITY", "Delhi")
 INTAKE_FIELDS = [
     {
         "key": "departure_city",
+        "label": "From",
         "question": "Where are you travelling from?",
         "placeholder": f"e.g. {DEFAULT_ORIGIN_CITY}",
         "options": [DEFAULT_ORIGIN_CITY, "Mumbai", "Bengaluru", "Hyderabad"],
     },
     {
         "key": "travel_dates",
+        "label": "Dates",
         "question": "When are you going?",
         "placeholder": "e.g. mid-May, or 3-9 March",
         "options": ["Next month", "In 2-3 months", "Later this year", "Dates are flexible"],
     },
     {
         "key": "duration",
+        "label": "Length",
         "question": "How long is the trip?",
         "placeholder": "e.g. 5 days",
         "options": ["A weekend", "5 days", "1 week", "2 weeks"],
     },
     {
         "key": "budget",
+        "label": "Budget",
         "question": "What's your budget per person?",
         "placeholder": "e.g. 1.5 lakhs per person",
         "options": ["Under 50k", "50k - 1 lakh", "1 - 2 lakhs", "2 lakhs+"],
     },
     {
         "key": "vibe",
+        "label": "Vibe",
         "question": "What kind of trip do you want?",
         "placeholder": "e.g. relaxed, adventurous, luxury",
         "options": ["Relaxed", "Adventurous", "Culture and history", "Nightlife", "Luxury"],
     },
     {
         "key": "interests",
+        "label": "Interests",
         "question": "Anything you must do, or want to avoid?",
         "placeholder": "e.g. street food, no museums",
         "options": ["Street food", "Museums and art", "Nature and hikes", "Shopping", "Beaches"],
     },
 ]
 
-# Pause at hil_agent for approval before the write-up. Off until the UI can answer it.
-REQUIRE_APPROVAL = os.getenv("REQUIRE_APPROVAL", "true").lower() == "true"
+# What the planner falls back to when the traveller never said. The brief marks these as assumed,
+# and they go into the prompts too, so the plan is built against the same terms the brief shows.
+INTAKE_DEFAULTS = {
+    "departure_city": DEFAULT_ORIGIN_CITY,
+    "travel_dates": "flexible, no fixed dates",
+    "duration": "5 days",
+    "budget": "no fixed budget",
+    "vibe": "a balanced mix",
+    "interests": "no must-dos",
+}
+
+# Pause at hil_agent for approval before the write-up. Off by default: intake_agent now collects the
+# trip's details up front, and a follow-up message refines the plan through the same feedback_agent.
+REQUIRE_APPROVAL = os.getenv("REQUIRE_APPROVAL", "false").lower() == "true"
 
 # How many times the traveller can send the plan back before the write-up is forced
 MAX_REVISIONS = int(os.getenv("MAX_REVISIONS", "3"))
@@ -310,6 +423,7 @@ def follow_up_supervisor(state:TravelState, user_query:str, existing_plan:str):
             "trip_request": intent.trip_request or user_query,
             "is_refinement": False,
             "itinerary": "",  # don't revise the old trip's plan
+            "itinerary_days": [],
             "selected_agents": list(AGENT_ORDER),
             "messages": [AIMessage(content="New trip request, planning from scratch")],
             "llm_calls": state["llm_calls"]+1
@@ -366,14 +480,15 @@ def intake_agent(state:TravelState):
         "Pull the trip details out of this travel request. Use null for anything it doesn't say; never guess.\n\n"
         f"Request: {trip_request}"
     )
-    constraints = {field["key"]: (getattr(found, field["key"], None) or "").strip() for field in INTAKE_FIELDS} if found else {}
+    # Every field the extractor returns, not just the ones asked as questions, so destination is kept too
+    constraints = {key: (getattr(found, key, None) or "").strip() for key in TripConstraints.model_fields} if found else {}
 
     missing = [field for field in INTAKE_FIELDS if not constraints.get(field["key"])]
 
     if not missing:
         logger.info("intake_agent | nothing to ask, all details given")
         return {
-            "trip_constraints": constraints,
+            **resolve_constraints(constraints),
             "intake_done": True,
             "llm_calls": state["llm_calls"]+1
         }
@@ -396,7 +511,7 @@ def intake_agent(state:TravelState):
     logger.info("intake_agent | answered: %s", {k: v for k, v in constraints.items() if v})
 
     return {
-        "trip_constraints": constraints,
+        **resolve_constraints(constraints),
         "intake_done": True,
         "messages": [
             AIMessage(content="Trip details noted"),
@@ -405,19 +520,98 @@ def intake_agent(state:TravelState):
     }
 
 
-def constraints_text(state:TravelState):
-    """The traveller's stated trip details, as a prompt block, or empty when there are none"""
+def resolve_constraints(constraints:dict):
+    """Fill in what the traveller never gave, and record which details were assumed rather than stated"""
+    resolved = dict(constraints)
+    assumed = [key for key, fallback in INTAKE_DEFAULTS.items() if not resolved.get(key)]
+
+    for key in assumed:
+        resolved[key] = INTAKE_DEFAULTS[key]
+
+    if assumed:
+        logger.info("intake_agent | assumed %s", assumed)
+
+    return {"trip_constraints": resolved, "assumed_constraints": assumed}
+
+
+def trip_brief(state:dict):
+    """The terms the plan was made against, for the strip shown above it"""
     constraints = state.get("trip_constraints") or {}
-    lines = [
-        f"- {field['question'].rstrip('?')}: {constraints[field['key']]}"
+    assumed = set(state.get("assumed_constraints") or [])
+
+    return [
+        {"label": field["label"], "value": constraints[field["key"]], "assumed": field["key"] in assumed}
         for field in INTAKE_FIELDS
         if constraints.get(field["key"])
     ]
 
+
+def destination_photo(destination:str):
+    """A photo of the destination for the plan's header card, from the same search the preview panel uses.
+    Candidates are checked first, because a dead or non-image link leaves a hole in the card."""
+    images = search_place(f"{destination} skyline landmark scenic view", max_results=6).get("images") or []
+
+    for image in images:
+        url = image.get("url", "")
+        # Stock libraries serve watermarked previews, which look broken on a card
+        if not url or any(host in url for host in STOCK_PHOTO_HOSTS):
+            continue
+
+        try:
+            response = requests.head(url, timeout=5, allow_redirects=True)
+        except requests.exceptions.RequestException:
+            continue
+
+        if response.status_code == 200 and response.headers.get("content-type", "").startswith("image/"):
+            logger.info("destination_photo | %s: %s", destination, preview(url, 70))
+            return url
+
+    logger.info("destination_photo | %s: nothing usable from %s candidates", destination, len(images))
+    return ""
+
+
+def title_case(text:str):
+    """Capitalise a place the traveller typed in lower case, without flattening DXB or UAE"""
+    return " ".join(word if word[:1].isupper() else word.capitalize() for word in text.split())
+
+
+def trip_header(state:dict):
+    """The plan's title card: where the trip goes, on what terms, and what it's estimated to cost"""
+    constraints = state.get("trip_constraints") or {}
+    destination = (constraints.get("destination") or "").strip()
+
+    if not destination:
+        return None
+
+    return {
+        "destination": title_case(destination),
+        "summary": state.get("plan_summary", ""),
+        "dates": constraints.get("travel_dates", ""),
+        "duration": constraints.get("duration", ""),
+        "origin": title_case(constraints.get("departure_city", "")),
+        # Always an estimate: no fares come back with the flight data, and hotels rarely carry prices
+        "total": state.get("budget_total", ""),
+        "image": state.get("destination_image", ""),
+    }
+
+
+def constraints_text(state:TravelState):
+    """The trip's terms as a prompt block, saying which ones the traveller never actually gave"""
+    constraints = state.get("trip_constraints") or {}
+    assumed = set(state.get("assumed_constraints") or [])
+    lines = []
+
+    for field in INTAKE_FIELDS:
+        value = constraints.get(field["key"])
+        if not value:
+            continue
+        note = " (assumed, the traveller didn't say)" if field["key"] in assumed else ""
+        lines.append(f"- {field['question'].rstrip('?')}: {value}{note}")
+
     if not lines:
         return ""
 
-    return "\n\nTrip details the traveller gave:\n" + "\n".join(lines)
+    return "\n\nTrip details, to plan against:\n" + "\n".join(lines)
 
 
 def flight_agent(state:TravelState):
@@ -466,6 +660,79 @@ def weather_agent(state:TravelState):
         "llm_calls": state["llm_calls"]+1
     }
 
+def stay_location(stay:Stay):
+    return f"{stay.area}, {stay.city}" if stay.area else stay.city
+
+
+def shortlist_hotels(stays:list, candidates:list):
+    """Pick HOTELS_PER_CITY hotels for each stay, keeping only links the search actually returned"""
+    listing = []
+    for index, (stay, results) in enumerate(zip(stays, candidates)):
+        lines = [f"Stay {index}: {stay_location(stay)}"]
+        lines += [f"- {result['title']} | {result['url']} | {result['content'][:200]}" for result in results]
+        listing.append("\n".join(lines))
+
+    shortlist = hotel_picker.invoke(
+        f"Choose the {HOTELS_PER_CITY} best hotels for each stay below, from that stay's own search results.\n"
+        "Prefer hotels that are well placed for the stay's area and well reviewed.\n"
+        "Give each hotel's own name, like 'Rove Downtown'. Many of these results are round-up articles listing "
+        "several hotels, so never use an article or category title, like 'The best hotels in Dubai', as a name.\n"
+        "Copy each hotel's url exactly from the result it came from; never write a url that isn't listed.\n\n"
+        + "\n\n".join(listing)
+    )
+
+    chosen = {entry.stay_index: entry.hotels for entry in shortlist.stays} if shortlist else {}
+    picks = []
+
+    for index, (stay, results) in enumerate(zip(stays, candidates)):
+        allowed = {result["url"]: result for result in results}
+        seen = set()
+        kept = []
+
+        for hotel in chosen.get(index, []):
+            # Drop anything whose link the search didn't return, rather than show an invented one
+            if hotel.url in allowed and hotel.url not in seen:
+                seen.add(hotel.url)
+                kept.append({"name": hotel.name, "url": hotel.url, "why": hotel.why})
+
+        # Top up from the search results when the model returned too few, or made links up
+        for result in results:
+            if len(kept) >= HOTELS_PER_CITY:
+                break
+            if result["url"] not in seen:
+                seen.add(result["url"])
+                kept.append({"name": result["title"], "url": result["url"], "why": result["content"][:200]})
+
+        for hotel in kept[:HOTELS_PER_CITY]:
+            picks.append({
+                **hotel,
+                "url": resolve_hotel_link(hotel["name"], stay.city) or hotel["url"],
+                "city": stay.city,
+                "area": stay.area or "",
+                "nights": stay.nights or 0,
+            })
+
+    return picks
+
+
+def resolve_hotel_link(name:str, city:str):
+    """The hotel's own page. Searching 'best hotels in X' returns round-up articles, not the hotels
+    themselves, so the shortlisted name is looked up again to get a link that goes where it says."""
+    results = search_place(f"{name} {city} hotel", max_results=3).get("results") or []
+    return results[0]["url"] if results else None
+
+
+def hotels_text(picks:list):
+    """The shortlist as a prompt block, so the write-up and the budget can use it"""
+    lines = []
+    for hotel in picks:
+        where = f"{hotel['area']}, {hotel['city']}" if hotel["area"] else hotel["city"]
+        nights = f" for {hotel['nights']} nights" if hotel["nights"] else ""
+        lines.append(f"- {hotel['name']} in {where}{nights} | {hotel['url']} | {hotel['why']}")
+
+    return "\n".join(lines)
+
+
 def hotel_agent(state:TravelState):
     user_query = state.get("trip_request") or state["user_query"]
     itinerary = state.get("itinerary", "")
@@ -476,42 +743,45 @@ def hotel_agent(state:TravelState):
     )
     stays = result.stays if result else []
 
-    # if stays:
-    #     hotel_sections = []
-    #     for stay in stays[:MAX_STAYS]:
-    #         location = f"{stay.area}, {stay.city}" if stay.area else stay.city
-    #         nights = f" for {stay.nights} nights" if stay.nights else ""
-    #         search_results = search_tavily(f"best hotels in {location}{nights}")
-    #         hotel_sections.append(f"Hotels in {location}{nights}:\n{search_results}")
-    #     hotels_data = "\n\n".join(hotel_sections)
-    # else:
-    #     # Couldn't read any stays from the itinerary, so search on the original request
-    #     hotels_data = search_tavily(f"best hotels for: {user_query}")
-
+    stays = stays[:MAX_STAYS]
     logger.info("hotel_agent | stays=%s", [stay.city for stay in stays] or "none found")
 
-    if stays:
-        hotel_sections = []
-        for stay in stays[:MAX_STAYS]:
-            location = f"{stay.area}, {stay.city}" if stay.area else stay.city
-            nights = f" for {stay.nights} nights" if stay.nights else ""
-            logger.info("hotel_agent | searching hotels in %s%s", location, nights)
-            search_results = run_sync(tavily_search(f"best hotels in {location}{nights}"))
-            hotel_sections.append(f"Hotels in {location}{nights}:\n{search_results}")
-        hotels_data = "\n\n".join(hotel_sections)
-    else:
-        # Couldn't read any stays from the itinerary, so search on the original request
-        hotels_data = run_sync(tavily_search(f"best hotels for: {user_query}"))
+    # Couldn't read any stays from the itinerary, so search on the original request instead
+    if not stays:
+        stays = [Stay(city=user_query, area=None, nights=None)]
 
+    # This uses Tavily over REST, not MCP, because the shortlist needs each hotel's own link
+    # and the MCP tool flattens its results into one block of text
+    candidates = []
+    for stay in stays:
+        location = stay_location(stay)
+        logger.info("hotel_agent | searching hotels in %s", location)
+        found = search_place(f"best hotels in {location}", max_results=6)
+        candidates.append([result for result in found["results"] if result.get("url")])
 
+    picks = shortlist_hotels(stays, candidates)
+    logger.info("hotel_agent | shortlisted %s hotels across %s stays", len(picks), len(stays))
 
     return {
-        "hotel_results": hotels_data,
+        "hotel_results": hotels_text(picks),
+        "hotel_picks": picks,
         "messages": [
             AIMessage(content="Hotel Results Fetched"),
         ],
         "llm_calls": state["llm_calls"]+1
     }
+
+
+def itinerary_markdown(plan:Itinerary):
+    """The structured plan as Markdown, for the agents downstream that read the itinerary as text"""
+    parts = [plan.overview.strip()] if plan.overview else []
+
+    for day in plan.days:
+        heading = f"## {day.label}: {day.heading}" if day.heading else f"## {day.label}"
+        lines = [f"- **{item.time}** {item.text}" for item in day.items]
+        parts.append("\n".join([heading, *lines]))
+
+    return "\n\n".join(parts)
 
 
 def itinerary_agent(state:TravelState):
@@ -522,15 +792,17 @@ def itinerary_agent(state:TravelState):
     feedback_history = state.get("feedback_history", []) if human_feedback else []
     previous_itinerary = state.get("itinerary", "") if human_feedback else ""
 
-    ITINERARY_PROMPT = """You are a travel planner. Using the user's request and the flight and weather data below, write a day-by-day travel itinerary in Markdown.
+    ITINERARY_PROMPT = """You are a travel planner. Using the user's request and the flight and weather data below, plan the trip day by day.
+Put in the overview which area to stay in and for how many nights in each city, and say which defaults you picked if the traveller didn't give trip length or budget.
+Give every day a label like "Day 1", a short heading naming the day, and its activities in order, each with the time it happens.
 When a previous version and feedback are given, revise that version: change what the feedback asks for, follow every earlier round of feedback too, and leave the rest of the plan as it was.
-For each city, say which area to stay in and for how many nights, but don't name specific hotels; those are searched separately.
-Make every place worth visiting a Markdown link to a Google search, like [Sagrada Familia](https://www.google.com/search?q=Sagrada+Familia+Barcelona): keep the place's own name as the link text, and put the place and its city in the query with spaces as +. Link each place the first time it appears, not every time.
+Don't name specific hotels; those are searched separately.
+Inside each activity's text, make every place worth visiting a Markdown link to a Google search, like [Sagrada Familia](https://www.google.com/search?q=Sagrada+Familia+Barcelona): keep the place's own name as the link text, and put the place and its city in the query with spaces as +. Link each place the first time it appears, not every time. This matters: the traveller opens these links to see the place.
 Never put brackets or parentheses inside a link's url, as they break the link: drop them from the query, so "Casa Mila (La Pedrera)" becomes query=Casa+Mila,+Barcelona.
 Plan around the weather: put outdoor activities on the clearer days and indoor ones on wet days, and say when you do so.
 The forecast only covers the next few days, so ignore it if the trip starts later.
-Use only the flights in the data; don't make any up. If the user didn't give trip length or budget, pick sensible defaults and say so.
-If the flight data is missing, empty or shows an error, still write the full itinerary. Say in one line that live flights couldn't be fetched and that the traveller should book separately. Never refuse to plan the trip over missing flights."""
+Use only the flights in the data; don't make any up.
+If the flight data is missing, empty or shows an error, still write the full itinerary. Say in the overview that live flights couldn't be fetched and that the traveller should book separately. Never refuse to plan the trip over missing flights."""
 
 
     trip_details = f"""User request:
@@ -556,20 +828,50 @@ Previous version of the itinerary, to revise:
 Traveller's feedback so far, most recent last:
 {joined}"""
 
-    response = llm.invoke([
+    messages = [
         SystemMessage(content=ITINERARY_PROMPT),
         HumanMessage(content=trip_details),
-    ])
-    itinerary = response.text
-    logger.info("itinerary_agent | wrote %s characters", len(itinerary))
+    ]
+    plan = itinerary_writer.invoke(messages)
+
+    if plan and plan.days:
+        itinerary = itinerary_markdown(plan)
+        days = [day.model_dump() for day in plan.days]
+        logger.info("itinerary_agent | %s days, %s characters", len(days), len(itinerary))
+    else:
+        # Structured output can come back empty; fall back to a plain write-up so the run still finishes
+        itinerary = llm.invoke(messages).text
+        days = []
+        logger.info("itinerary_agent | no structured days, wrote %s characters", len(itinerary))
 
     return {
         "itinerary": itinerary,
+        "itinerary_days": days,
         "messages": [
             AIMessage(content=itinerary),
         ],
         "llm_calls": state["llm_calls"]+1
     }
+
+def cost_summary(estimate):
+    """The cost table for the plan: its lines, the total, and how much of a stated budget that uses"""
+    if not estimate:
+        return {"lines": [], "total": "", "ceiling": "", "percent": None}
+
+    total, ceiling = estimate.total_value, estimate.ceiling_value
+    # Worked out here rather than trusted from the model, and only against a budget the traveller gave
+    percent = round(total / ceiling * 100) if total and ceiling and ceiling > 0 else None
+
+    return {
+        "lines": [
+            {"label": line.label, "amount": line.amount, "note": line.note or ""}
+            for line in estimate.lines
+        ],
+        "total": estimate.total or "",
+        "ceiling": estimate.ceiling_label or "",
+        "percent": percent,
+    }
+
 
 def budget_agent(state:TravelState):
     """Analyze whether the planned trip fits the user's budget"""
@@ -579,11 +881,12 @@ def budget_agent(state:TravelState):
     itinerary = state.get("itinerary", "")
 
     BUDGET_PROMPT = """You are a travel budget analyst. Work out roughly what the planned trip costs and whether it fits the traveller's budget.
-Break the cost down by flights, accommodation, food, local transport and activities, and give a total range per person.
+Break the cost down into one line each for flights, accommodation, food, local transport and activities, and give a total range per person.
+Make the accommodation line name the area and the number of nights, like "Stay · Downtown · 4 nights".
 Use the traveller's own currency if the request names one.
-Label every figure an estimate: the flight data carries no fares, and the hotel data only sometimes mentions prices.
-If the request names a budget, say plainly whether the trip fits it, and if it doesn't, say what to cut.
-If no budget is given, say so and give the estimate anyway. Answer in Markdown, under 250 words."""
+Every figure is an estimate: the flight data carries no fares, and the hotel data only sometimes mentions prices.
+Only fill in the traveller's budget when they actually named one. If they didn't, leave it null rather than inventing a ceiling.
+The verdict says whether the trip fits that budget and what to cut if it doesn't, in one short paragraph under 120 words. Don't repeat the breakdown there: it is shown as its own table."""
 
     trip_details = f"""User request:
 {user_query}
@@ -597,15 +900,25 @@ Hotel data:
 Itinerary:
 {itinerary}""" + constraints_text(state)
 
-    response = llm.invoke([
+    messages = [
         SystemMessage(content=BUDGET_PROMPT),
         HumanMessage(content=trip_details),
-    ])
-    budget_results = response.text
-    logger.info("budget_agent | %s", preview(budget_results))
+    ]
+    estimate = budget_writer.invoke(messages)
+
+    # Structured output can come back empty; fall back to a plain write-up so the run still finishes
+    budget_results = estimate.analysis if estimate else llm.invoke(messages).text
+    budget_total = (estimate.total or "") if estimate else ""
+    budget_costs = cost_summary(estimate)
+    logger.info(
+        "budget_agent | total=%r lines=%s %s",
+        budget_total, len(budget_costs["lines"]), preview(budget_results),
+    )
 
     return {
         "budget_results": budget_results,
+        "budget_total": budget_total,
+        "budget_costs": budget_costs,
         "messages": [
             AIMessage(content="Budget Analysed"),
         ],
@@ -730,12 +1043,13 @@ def final_response_agent(state:TravelState):
     human_feedback = state.get("human_feedback", "") if not state.get("approved") else ""
 
     FINAL_RESPONSE_PROMPT = """You are a travel planner. Combine the user's request, flight data, hotel data, weather data, budget analysis and itinerary below into one clear, well-formatted travel plan in Markdown.
-Use these sections: Trip Overview, Flights, Hotels, Weather, Day-by-Day Itinerary, Estimated Budget, Travel Tips. Use headings, bullet points and tables where they help.
-In the Hotels section, group the hotels by each stay in the itinerary, and make each hotel name a Markdown link to its url from the hotel data. Skip the link when the data has no url for it; never invent one.
-Keep the Google search links the itinerary already has, and add one for any place that is missing it, like [Sagrada Familia](https://www.google.com/search?q=Sagrada+Familia+Barcelona), with spaces as + in the query.
+Write these sections in this order, and start each one with a Markdown "## " heading, exactly: "## Trip Overview", "## Flights", "## Hotels", "## Weather", "## Estimated Budget", "## Travel Tips". Use bullet points and tables where they help.
+Don't write the day-by-day plan: it is rendered from the itinerary below. Instead put the line [[ITINERARY]] on its own, between the Hotels section and the Weather section, and it will be shown there.
+Don't list the hotels either: they are rendered from the hotel data below. Under the "## Hotels" heading write one line on how the stays are split across the trip, then put the line [[HOTELS]] on its own, and the shortlist will be shown there.
+Every place you name anywhere in the plan must be a Markdown link to a Google search, like [Sagrada Familia](https://www.google.com/search?q=Sagrada+Familia+Barcelona), with spaces as + in the query. That includes the places named in the Trip Overview and Travel Tips. Link each place the first time it appears, not every time.
 Never put brackets or parentheses inside a link's url, as they break the link: drop them from the query, so "Casa Mila (La Pedrera)" becomes query=Casa+Mila,+Barcelona.
 In the Weather section, give the current conditions and the daily forecast from the weather data, and say that the forecast covers only the next few days.
-In the Estimated Budget section, use the budget analysis when there is one, keeping its figures and its verdict on whether the trip fits the budget.
+Under the "## Estimated Budget" heading, give the budget analysis's verdict on whether the trip fits, then put the line [[COSTS]] on its own. The cost breakdown is rendered there, so don't list the figures yourself.
 When the traveller has given feedback, rework the plan to follow it and say at the top what you changed. Their feedback outweighs the itinerary above.
 Use only the flights, hotels and weather in the data; don't make any up.
 If any of the data is missing, empty or shows an error, still write the whole plan: say in that section only that the information wasn't available and what the traveller should do instead. Never refuse the plan because one source is missing."""
@@ -764,22 +1078,32 @@ Itinerary:
 Traveller's feedback on the plan:
 {human_feedback}"""
 
-    response = llm.invoke([
+    messages = [
         SystemMessage(content=FINAL_RESPONSE_PROMPT),
         HumanMessage(content=trip_details),
-    ])
-    final_response = response.text
+    ]
+    written = final_plan_writer.invoke(messages)
+
+    # Structured output can come back empty; fall back to a plain write-up so the run still finishes
+    final_response = written.plan if written and written.plan else llm.invoke(messages).text
+    summary = written.summary if written else ""
     logger.info(
-        "final_response_agent | wrote %s characters, feedback applied=%s",
+        "final_response_agent | wrote %s characters, feedback applied=%s, summary=%r",
         len(final_response),
         bool(human_feedback),
+        preview(summary, 60),
     )
+
+    destination = (state.get("trip_constraints") or {}).get("destination", "")
+    image = destination_photo(destination) if destination else ""
 
     # Keep the last few finished plans, so a follow-up in this thread has something to build on
     plan_history = [*state.get("plan_history", [])[-2:], f"Request: {user_query}\n\nPlan:\n{itinerary}"]
 
     return {
         "final_response": final_response,
+        "plan_summary": summary,
+        "destination_image": image,
         "plan_history": plan_history,
         "messages": [
             AIMessage(content=final_response),
@@ -857,6 +1181,7 @@ def _initial_state(query:str):
         "guardrail_reason": "",
         "selected_agents": [],
         "trip_constraints": {},
+        "assumed_constraints": [],
         "supervisor_reasoning": "",
 
         # Approval state
@@ -952,6 +1277,11 @@ def _progress_events(stream, thread_id:str, config:dict):
             "pause_type": pause.get("type", "approval") if isinstance(pause, dict) else "approval",
             "pause_payload": pause,
             "final_response": "",
+            "days": [],
+            "hotels": [],
+            "brief": [],
+            "costs": None,
+            "header": None,
         }
 
     yield {"event": "done", "data": result}
@@ -968,6 +1298,11 @@ def format_result(thread_id:str, result:dict):
             "pause_type": payload.get("type", "approval") if isinstance(payload, dict) else "approval",
             "pause_payload": payload,
             "final_response": "",
+            "days": [],
+            "hotels": [],
+            "brief": [],
+            "costs": None,
+            "header": None,
             "llm_calls": result.get("llm_calls", 0),
         }
 
@@ -976,6 +1311,14 @@ def format_result(thread_id:str, result:dict):
         "pause_type": None,
         "pause_payload": None,
         "final_response": result.get("final_response", ""),
+        # The day-by-day plan and the hotel shortlist, which the UI renders as cards instead of prose
+        "days": result.get("itinerary_days", []),
+        "hotels": result.get("hotel_picks", []),
+        # The terms the plan was made against, shown as a strip above it
+        "brief": trip_brief(result),
+        "costs": result.get("budget_costs") or None,
+        # The plan's title card, under the brief
+        "header": trip_header(result),
         "llm_calls": result.get("llm_calls", 0),
     }
 

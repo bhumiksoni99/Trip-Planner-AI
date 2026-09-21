@@ -1,12 +1,12 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { ApprovalPause, IntakePause } from "@/lib/api";
+import type { ApprovalPause, BriefTerm, IntakePause, PlanCosts, PlanDay, PlanHeader, PlanHotel } from "@/lib/api";
 import type { Message } from "@/lib/threads";
 import AgentProgress, { type ProgressState } from "./AgentProgress";
 import IntakeCard from "./IntakeCard";
+import PlanBody from "./PlanBody";
 import { CheckIcon, CopyIcon, DownloadIcon, RetryIcon } from "./icons";
-import Markdown from "./Markdown";
 
 type MessageListProps = {
   threadId: string;
@@ -14,7 +14,7 @@ type MessageListProps = {
   pending: boolean;
   progress: ProgressState;
   onRetry: () => void;
-  onDownload: (content: string) => void;
+  onDownload: (content: string, days?: PlanDay[], hotels?: PlanHotel[], brief?: BriefTerm[], header?: PlanHeader | null, costs?: PlanCosts | null) => void;
   pause: IntakePause | ApprovalPause | null;
   onApprove: () => void;
   onRequestChanges: (feedback: string) => void;
@@ -60,7 +60,16 @@ export default function MessageList({
             ) : message.error ? (
               <ErrorMessage content={message.content} onRetry={isLast && !pending ? onRetry : undefined} />
             ) : (
-              <AssistantMessage content={message.content} onDownload={onDownload} onLinkClick={onLinkClick} />
+              <AssistantMessage
+                content={message.content}
+                days={message.days}
+                hotels={message.hotels}
+                brief={message.brief}
+                header={message.header}
+                costs={message.costs}
+                onDownload={onDownload}
+                onLinkClick={onLinkClick}
+              />
             )}
           </div>
         );
@@ -94,21 +103,31 @@ function UserMessage({ content }: { content: string }) {
 
 function AssistantMessage({
   content,
+  days,
+  hotels,
+  brief,
+  header,
+  costs,
   onDownload,
   onLinkClick,
 }: {
   content: string;
-  onDownload: (content: string) => void;
+  days?: PlanDay[];
+  hotels?: PlanHotel[];
+  brief?: BriefTerm[];
+  header?: PlanHeader | null;
+  costs?: PlanCosts | null;
+  onDownload: (content: string, days?: PlanDay[], hotels?: PlanHotel[], brief?: BriefTerm[], header?: PlanHeader | null, costs?: PlanCosts | null) => void;
   onLinkClick: (href: string, label: string) => void;
 }) {
   return (
     <div className="flex gap-3 sm:gap-4">
       <Avatar />
       <div className="min-w-0 flex-1 pt-0.5">
-        <Markdown content={content} onLinkClick={onLinkClick} />
+        <PlanBody content={content} days={days} hotels={hotels} brief={brief} header={header} costs={costs} onLinkClick={onLinkClick} />
         <div className="mt-4 -ml-2 flex flex-wrap gap-1">
           <CopyButton text={content} />
-          <button type="button" className="action-btn" onClick={() => onDownload(content)}>
+          <button type="button" className="action-btn" onClick={() => onDownload(content, days, hotels, brief, header, costs)}>
             <DownloadIcon />
             Download PDF
           </button>

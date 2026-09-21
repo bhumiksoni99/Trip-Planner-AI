@@ -1,40 +1,55 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import {
   requestPlan,
   resumePlan,
   type AgentProgressEvent,
   type ApprovalPause,
+  type BriefTerm,
   type IntakePause,
+  type PlanDay,
+  type PlanCosts,
+  type PlanHeader,
+  type PlanHotel,
   type PlanResponse,
   type ResumeAnswer,
 } from "@/lib/api";
+import { setActiveThreadId, useActiveThreadId } from "@/lib/activeThread";
 import { addMessage, createThread, deleteThread, removeLastMessage, useThreads } from "@/lib/threads";
 import { applyProgress, emptyProgress, type ProgressState } from "./AgentProgress";
-import Composer from "./Composer";
+import Composer, { type ComposerHandle } from "./Composer";
 import EmptyState from "./EmptyState";
 import { MenuIcon, PlusIcon, SidebarIcon } from "./icons";
-import Markdown from "./Markdown";
+import PlanBody from "./PlanBody";
 import LinkPanel, { type OpenLink } from "./LinkPanel";
 import MessageList from "./MessageList";
 import Sidebar from "./Sidebar";
 
 export default function ChatApp() {
   const threads = useThreads();
-  const [activeId, setActiveId] = useState<string | null>(null);
-  const [draft, setDraft] = useState("");
+  // Which trip is open is held in the URL, not in state, so ?thread= and the UI can't drift apart
+  const activeId = useActiveThreadId();
   const [pendingIds, setPendingIds] = useState<Set<string>>(() => new Set());
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [printContent, setPrintContent] = useState<string | null>(null);
+  const [printContent, setPrintContent] = useState<{
+    content: string;
+    days?: PlanDay[];
+    hotels?: PlanHotel[];
+    brief?: BriefTerm[];
+    header?: PlanHeader | null;
+    costs?: PlanCosts | null;
+  } | null>(null);
   // A link from a plan, shown beside the chat instead of navigating away
   const [openLink, setOpenLink] = useState<OpenLink | null>(null);
   // What the backend is waiting on per thread: trip details, or approval of a draft plan
   const [pauses, setPauses] = useState<Record<string, IntakePause | ApprovalPause>>({});
   // Which agents are running for each thread, as the backend reports them
   const [progress, setProgress] = useState<Record<string, ProgressState>>({});
+  // The composer keeps its own draft, so typing doesn't re-render the conversation
+  const composerRef = useRef<ComposerHandle>(null);
 
   const sortedThreads = useMemo(() => [...threads].sort((a, b) => b.updatedAt - a.updatedAt), [threads]);
   const activeThread = threads.find((thread) => thread.id === activeId) ?? null;
@@ -71,7 +86,15 @@ export default function ChatApp() {
     } else if (pause?.type === "intake") {
       setPause(threadId, pause);
     } else {
-      addMessage(threadId, { role: "assistant", content: result.final_response });
+      addMessage(threadId, {
+        role: "assistant",
+        content: result.final_response,
+        days: result.days,
+        hotels: result.hotels,
+        brief: result.brief,
+        header: result.header,
+        costs: result.costs,
+      });
     }
   }
 
@@ -132,13 +155,12 @@ export default function ChatApp() {
     let threadId = activeThread?.id;
     if (!threadId) {
       threadId = createThread(trimmed);
-      setActiveId(threadId);
+      setActiveThreadId(threadId);
     } else if (pendingIds.has(threadId)) {
       return;
     }
 
     addMessage(threadId, { role: "user", content: trimmed });
-    setDraft("");
     void ask(threadId, trimmed);
   }
 
@@ -152,25 +174,25 @@ export default function ChatApp() {
   }
 
   function startNewChat() {
-    setActiveId(null);
-    setDraft("");
+    composerRef.current?.clear();
+    setActiveThreadId(null);
     setMobileSidebarOpen(false);
   }
 
   function selectThread(threadId: string) {
-    setActiveId(threadId);
+    setActiveThreadId(threadId);
     setMobileSidebarOpen(false);
   }
 
   function removeThread(threadId: string) {
     if (!window.confirm("Delete this trip? This can't be undone.")) return;
     deleteThread(threadId);
-    if (threadId === activeId) setActiveId(null);
+    if (threadId === activeId) setActiveThreadId(null);
   }
 
-  function downloadPdf(content: string) {
+  function downloadPdf(content: string, days?: PlanDay[], hotels?: PlanHotel[], brief?: BriefTerm[], header?: PlanHeader | null, costs?: PlanCosts | null) {
     // Render only this reply into the print view, then open the print dialog ("Save as PDF")
-    flushSync(() => setPrintContent(content));
+    flushSync(() => setPrintContent({ content, days, hotels, brief, header, costs }));
     const previousTitle = document.title;
     document.title = activeThread ? `TripMate AI - ${activeThread.title}` : "TripMate AI - Travel Plan";
     window.addEventListener("afterprint", () => (document.title = previousTitle), { once: true });
@@ -250,7 +272,7 @@ export default function ChatApp() {
             )}
           </main>
 
-          <Composer value={draft} onChange={setDraft} onSubmit={() => send(draft)} disabled={activePending} />
+          <Composer ref={composerRef} onSubmit={send} disabled={activePending} />
         </div>
 
         {openLink && <LinkPanel key={openLink.href} link={openLink} onClose={() => setOpenLink(null)} />}
@@ -259,7 +281,14 @@ export default function ChatApp() {
       {printContent && (
         <div className="hidden print:block">
           <h1 className="mb-6 font-display text-4xl text-ink">AI Travel Plan</h1>
-          <Markdown content={printContent} />
+          <PlanBody
+            content={printContent.content}
+            days={printContent.days}
+            hotels={printContent.hotels}
+            brief={printContent.brief}
+            header={printContent.header}
+            costs={printContent.costs}
+          />
         </div>
       )}
     </>

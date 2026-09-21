@@ -1,27 +1,33 @@
+import Image from "next/image";
 import { ArrowRightIcon, GlobeIcon } from "./icons";
 
 // The backend plans from Delhi unless the traveller says otherwise
 const ORIGIN = "Delhi";
 
+// The photos are Creative Commons, so their credit is shown under the cards.
+// Full licence details are in public/destinations/CREDITS.md
 const ROUTES = [
   {
     name: "Dubai",
     code: "DXB",
-    icon: "🏙️",
+    image: "/destinations/dubai.jpg",
+    credit: "Dubai skyline by Tim Reckmann (CC BY 2.0)",
     blurb: "5 days · Downtown base, desert evening",
     prompt: "Plan a 5 days Dubai trip from Delhi with flights, hotels and sightseeing.",
   },
   {
     name: "Japan",
     code: "HND",
-    icon: "🗾",
+    image: "/destinations/japan.jpg",
+    credit: "Chureito Pagoda by Stjepko Krehula (CC BY 4.0)",
     blurb: "7 days · Tokyo and Kyoto by rail",
     prompt: "Plan a complete 7 days Japan trip from Delhi including flights, hotels and sightseeing under 2 lakhs.",
   },
   {
     name: "Thailand",
     code: "BKK",
-    icon: "🏝️",
+    image: "/destinations/thailand.jpg",
+    credit: "Wat Arun by BerryJ (CC BY-SA 4.0)",
     blurb: "7 days · Bangkok, then the islands",
     prompt: "Plan a 7 days Thailand trip from Delhi with budget hotels and sightseeing.",
   },
@@ -58,9 +64,15 @@ export default function EmptyState({ onPick }: { onPick: (prompt: string) => voi
 
       <section className="grid grid-cols-[repeat(auto-fit,minmax(230px,1fr))] gap-px border border-t-0 border-line bg-line">
         {ROUTES.map((route) => (
-          <button key={route.name} type="button" className="route-card" onClick={() => onPick(route.prompt)}>
-            <span aria-hidden className="flex h-[120px] items-center justify-center bg-raised text-4xl">
-              {route.icon}
+          <button key={route.name} type="button" className="route-card group" onClick={() => onPick(route.prompt)}>
+            <span aria-hidden className="relative block h-[120px] overflow-hidden bg-raised">
+              <Image
+                src={route.image}
+                alt=""
+                fill
+                sizes="(max-width: 640px) 100vw, 300px"
+                className="object-cover transition-transform duration-300 group-hover:scale-105"
+              />
             </span>
             <span className="block px-5 pt-4.5 pb-5.5">
               <span className="flex items-baseline justify-between gap-2">
@@ -88,6 +100,19 @@ export default function EmptyState({ onPick }: { onPick: (prompt: string) => voi
           </span>
         </button>
       </section>
+
+      <p className="mt-3 text-[11px] leading-relaxed text-faint">
+        Photos: {ROUTES.map((route) => route.credit).join(" · ")}, via{" "}
+        <a
+          href="https://commons.wikimedia.org"
+          target="_blank"
+          rel="noreferrer"
+          className="underline underline-offset-2 hover:text-muted"
+        >
+          Wikimedia Commons
+        </a>
+        .
+      </p>
     </div>
   );
 }

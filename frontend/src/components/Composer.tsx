@@ -1,30 +1,46 @@
 "use client";
 
-import { useRef } from "react";
+import { useImperativeHandle, useRef, useState, type Ref } from "react";
 import { ArrowRightIcon } from "./icons";
 
+export type ComposerHandle = {
+  clear: () => void;
+  focus: () => void;
+};
+
 type ComposerProps = {
-  value: string;
-  onChange: (value: string) => void;
-  onSubmit: () => void;
+  onSubmit: (text: string) => void;
   disabled: boolean;
+  ref?: Ref<ComposerHandle>;
 };
 
 const MAX_HEIGHT = 208;
 
-export default function Composer({ value, onChange, onSubmit, disabled }: ComposerProps) {
+export default function Composer({ onSubmit, disabled, ref }: ComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const canSend = !disabled && value.trim().length > 0;
+  // The draft lives in the textarea, not in React state. Holding it in state re-rendered the whole
+  // conversation on every keystroke, which meant re-parsing each plan's Markdown as you typed.
+  // This only tracks whether there is any text, so Send can enable itself.
+  const [hasText, setHasText] = useState(false);
+  const canSend = !disabled && hasText;
 
-  function resize(textarea: HTMLTextAreaElement) {
+  useImperativeHandle(ref, () => ({ clear: reset, focus: () => textareaRef.current?.focus() }));
+
+  function reset() {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+
+    textarea.value = "";
     textarea.style.height = "auto";
-    textarea.style.height = `${Math.min(textarea.scrollHeight, MAX_HEIGHT)}px`;
+    setHasText(false);
   }
 
   function submit() {
-    if (!canSend) return;
-    onSubmit();
-    if (textareaRef.current) textareaRef.current.style.height = "auto";
+    const text = textareaRef.current?.value.trim() ?? "";
+    if (!text || disabled) return;
+
+    reset();
+    onSubmit(text);
   }
 
   return (
@@ -44,10 +60,15 @@ export default function Composer({ value, onChange, onSubmit, disabled }: Compos
             id="composer"
             ref={textareaRef}
             rows={1}
-            value={value}
+            defaultValue=""
             onChange={(event) => {
-              onChange(event.target.value);
-              resize(event.currentTarget);
+              const textarea = event.currentTarget;
+              textarea.style.height = "auto";
+              textarea.style.height = `${Math.min(textarea.scrollHeight, MAX_HEIGHT)}px`;
+
+              // Returning the same value makes React skip the render, so most keystrokes cost nothing
+              const filled = textarea.value.trim().length > 0;
+              setHasText((current) => (current === filled ? current : filled));
             }}
             onKeyDown={(event) => {
               // Enter sends, Shift+Enter adds a new line

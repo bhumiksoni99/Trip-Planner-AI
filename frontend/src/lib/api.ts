@@ -19,9 +19,69 @@ export type IntakePause = {
   questions: IntakeQuestion[];
 };
 
+export type PlanDayItem = {
+  time: string;
+  text: string;
+};
+
+// The day-by-day plan, sent as data so the UI can lay it out rather than print it as prose
+export type PlanDay = {
+  label: string;
+  heading: string;
+  items: PlanDayItem[];
+};
+
+// One term the plan was made against. `assumed` means the traveller never said, so we filled it in
+export type BriefTerm = {
+  label: string;
+  value: string;
+  assumed: boolean;
+};
+
+// A shortlisted hotel for one of the itinerary's stays
+export type PlanHotel = {
+  name: string;
+  url: string;
+  why: string;
+  city: string;
+  area: string;
+  nights: number;
+};
+
+export type CostLine = {
+  label: string;
+  amount: string;
+  note: string;
+};
+
+// The cost breakdown, shown as a table in the budget section
+export type PlanCosts = {
+  lines: CostLine[];
+  total: string;
+  ceiling: string;
+  // Share of the budget the traveller stated; null when they gave none
+  percent: number | null;
+};
+
+// The plan's title card: where the trip goes, on what terms, and its estimated cost
+export type PlanHeader = {
+  destination: string;
+  summary: string;
+  dates: string;
+  duration: string;
+  origin: string;
+  total: string;
+  image: string;
+};
+
 export type PlanResponse = {
   thread_id: string;
   final_response: string;
+  header: PlanHeader | null;
+  costs: PlanCosts | null;
+  days: PlanDay[];
+  hotels: PlanHotel[];
+  brief: BriefTerm[];
   llm_calls: number;
   // Set when the backend paused, either for trip details or for approval; answer it with resumePlan()
   pause_type: "intake" | "approval" | null;
