@@ -164,4 +164,28 @@ def score_replan(out: dict, expect: dict):
     return results
 
 
-SCORERS = {"guardrail": score_guardrail, "extraction": score_extraction, "stays": score_stays, "replan": score_replan}
+def score_itinerary(out: dict, expect: dict):
+    """The stays the writer lists have to agree with the itinerary it wrote, since hotel_agent trusts them"""
+    stays = out["stays"]
+    places = [norm(f"{stay.get('city', '')} {stay.get('area') or ''}") for stay in stays]
+    text = norm(out["text"])
+
+    results = [("stays_listed", bool(stays), f"{len(stays)} stays")]
+
+    missing = [options[0] for options in expect["places"] if not any(norm(o) in place for o in options for place in places)]
+    results.append(("named_places", not missing, f"missing {missing}; got {[s.get('city') for s in stays]}"))
+
+    invented = [stay.get("city") for stay in stays if norm(stay.get("city")) not in text]
+    results.append(("in_the_text", not invented, f"stays the itinerary never mentions: {invented}"))
+
+    # A trip of N days sleeps N-1 nights when the last day is the flight home, or N when it isn't shown
+    nights = [stay.get("nights") for stay in stays]
+    if stays and all(isinstance(n, int) for n in nights) and out["days"]:
+        total = sum(nights)
+        results.append(("nights_add_up", total in (out["days"] - 1, out["days"]), f"{total} nights over {out['days']} days"))
+
+    return results
+
+
+SCORERS = {"guardrail": score_guardrail, "extraction": score_extraction, "stays": score_stays, "replan": score_replan,
+           "itinerary": score_itinerary}

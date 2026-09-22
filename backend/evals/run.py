@@ -69,10 +69,15 @@ def evaluator_for(name: str):
     scorer = SCORERS[name]
 
     def evaluate_row(outputs: dict, reference_outputs: dict) -> dict:
+        # A target that raised leaves nothing to score; that's a failed row, not a reason to stop the run
+        failed = {"results": [{"key": "error", "score": 0, "comment": "the target raised; see the run in LangSmith"}]}
         if not outputs:
-            return {"results": [{"key": "error", "score": 0, "comment": "the target raised; see the run in LangSmith"}]}
-        return {"results": [{"key": key, "score": int(passed), "comment": comment}
-                            for key, passed, comment in scorer(outputs, reference_outputs)]}
+            return failed
+        try:
+            checks = scorer(outputs, reference_outputs)
+        except (KeyError, TypeError):
+            return failed
+        return {"results": [{"key": key, "score": int(passed), "comment": comment} for key, passed, comment in checks]}
 
     evaluate_row.__name__ = f"score_{name}"
     return evaluate_row
@@ -135,7 +140,8 @@ def summarise(name: str, reps_results: list[list[dict]]):
         cells = []
         for rows in reps_results:
             scored = [row["scores"][metric][0] for row in rows if metric in row["scores"]]
-            cells.append(f"{sum(scored)}/{len(scored)}" if scored else "-")
+            # An evaluator that errored records no score, which counts as a fail
+            cells.append(f"{sum(1 for score in scored if score)}/{len(scored)}" if scored else "-")
         print(f"  {metric:<16}" + "".join(f"  {cell:<9}" for cell in cells))
 
     passed = [f"{sum(all(s for s, _ in row['scores'].values()) for row in rows)}/{len(rows)}" for rows in reps_results]

@@ -86,17 +86,29 @@ Arrival:
 """.strip()
 
 
+MISSING_KEY = (
+    "Flight API error: AVIATIONSTACK_API_KEY is missing.\n"
+    "Please add this in your .env file:\n"
+    "AVIATIONSTACK_API_KEY=your_api_key_here"
+)
+
+
 def search_flights(query: str, limit: int = 10):
+    """Live flights for a free-text request, working out the airports with a model call first.
+    When the airport codes are already known, flights_between skips that call."""
     if not API_KEY:
-        return (
-            "Flight API error: AVIATIONSTACK_API_KEY is missing.\n"
-            "Please add this in your .env file:\n"
-            "AVIATIONSTACK_API_KEY=your_api_key_here"
-        )
+        return MISSING_KEY
 
     route = get_route(query)
-    dep_iata = route.origin_iata.upper() if route.origin_iata else None
-    arr_iata = route.destination_iata.upper() if route.destination_iata else None
+    dep_iata = route.origin_iata.upper() if route and route.origin_iata else None
+    arr_iata = route.destination_iata.upper() if route and route.destination_iata else None
+    return flights_between(dep_iata, arr_iata, limit)
+
+
+def flights_between(dep_iata: str | None, arr_iata: str | None, limit: int = 10):
+    """Live flights between two airports, by their 3-letter IATA codes. No model call."""
+    if not API_KEY:
+        return MISSING_KEY
 
     params = {
         "access_key": API_KEY,

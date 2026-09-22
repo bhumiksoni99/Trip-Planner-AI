@@ -26,24 +26,36 @@ def guardrail(inputs: dict) -> dict:
 
 
 def extraction(inputs: dict) -> dict:
-    """Everything the graph pulls out of a request: intake's trip details, the weather agent's city,
-    and the flight agent's airports. Three model calls today, which optimisations 1 and 2 cut to one."""
+    """Everything the graph pulls out of a request: intake's trip details, and the city and airports the
+    weather and flight agents end up using. Normally one model call, with the agents' fallbacks counted
+    when intake leaves a gap they have to fill."""
     request = inputs["request"]
 
     found = agent.extract_constraints(request)
+    # The trip details as stated, so the "never guess" checks see what the model actually returned
     details = {key: getattr(found, key, None) for key in agent.TripConstraints.model_fields} if found else {}
+    calls = 1
 
-    # Built the way flight_agent builds it, from the request and the departure city intake found
-    departure = details.get("departure_city")
-    route = get_route(f"{request} departing from {departure}" if departure else request)
+    # What the agents work from: intake's details with its defaults filled in, like the departure city
+    stated = {key: (value or "").strip() if isinstance(value, str) else value for key, value in details.items()}
+    resolved = agent.resolve_constraints(stated)["trip_constraints"]
 
-    return {
-        **details,
-        "destination_city": agent.extract_destination_city(request),
-        "origin_iata": (route.origin_iata or "").upper() if route else "",
-        "destination_iata": (route.destination_iata or "").upper() if route else "",
-        "llm_calls": 3,
-    }
+    # flight_agent's route, and its fallback when intake couldn't place an airport
+    origin, destination = agent.flight_route(resolved)
+    if not (origin and destination):
+        departure = resolved.get("departure_city")
+        route = get_route(f"{request} departing from {departure}" if departure else request)
+        origin = (route.origin_iata or "").upper() if route else ""
+        destination = (route.destination_iata or "").upper() if route else ""
+        calls += 1
+
+    # weather_agent's city, and its fallback
+    city = resolved.get("destination_city")
+    if not city:
+        city = agent.extract_destination_city(request) or resolved.get("destination")
+        calls += 1
+
+    return {**details, "destination_city": city, "origin_iata": origin or "", "destination_iata": destination or "", "llm_calls": calls}
 
 
 def stays(inputs: dict) -> dict:
@@ -73,13 +85,24 @@ def replan(inputs: dict) -> dict:
         "llm_calls": decided.get("llm_calls", 0),
     }
 
-    # Only a change to this plan goes on to feedback_agent, exactly as the graph routes it
+    # A change to this plan is decided in the same call, which also picks what re-runs;
+    # the graph routes straight to those agents
     if result["is_travel"] and result["is_refinement"]:
-        replanned = agent.feedback_agent({**state, **decided})
-        result["rerun"] = replanned["selected_agents"]
-        result["llm_calls"] += replanned.get("llm_calls", 0)
+        result["rerun"] = decided.get("selected_agents", [])
 
     return result
 
 
-TARGETS = {"guardrail": guardrail, "extraction": extraction, "stays": stays, "replan": replan}
+def itinerary(inputs: dict) -> dict:
+    """The itinerary writer on a trip request, with the stays it lists for hotel_agent. Run without flight
+    or weather data, which only shape the days, not where the traveller sleeps."""
+    written = agent.itinerary_agent({"user_query": inputs["request"], "trip_request": inputs["request"]})
+    return {
+        "stays": written.get("itinerary_stays", []),
+        "days": len(written.get("itinerary_days", [])),
+        "text": written.get("itinerary", ""),
+        "llm_calls": written.get("llm_calls", 0),
+    }
+
+
+TARGETS = {"guardrail": guardrail, "extraction": extraction, "stays": stays, "replan": replan, "itinerary": itinerary}
