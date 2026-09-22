@@ -12,8 +12,9 @@ export type ProgressState = {
 
 export const emptyProgress: ProgressState = { agents: [], status: {} };
 
-// These pause the run and get a card of their own, so they don't belong in the checklist
-const HIDDEN = new Set(["intake_agent", "hil_agent"]);
+// Intake and approval pause the run and get a card of their own, and the photo agent only fetches
+// the header image, which isn't something the traveller asked for, so none belong in the checklist
+const HIDDEN = new Set(["intake_agent", "hil_agent", "photo_agent"]);
 
 const LABELS: Record<string, string> = {
   supervisor_agent: "Reading your request",

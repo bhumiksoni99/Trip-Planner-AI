@@ -6,18 +6,19 @@ from typing import TypedDict, Annotated, Any
 import uuid
 import requests
 import operator
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 import psycopg
 from psycopg.rows import dict_row
 from pydantic import BaseModel, Field
 
 from langgraph.graph import StateGraph, START, END
-from langgraph.types import interrupt, Command
+from langgraph.types import interrupt, Command, Overwrite
 from langgraph.checkpoint.postgres import PostgresSaver
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, AnyMessage
-from mcp_client import tavily_search, run_sync, get_weather
 from place_preview import search_place
 from tools.flight_tool import search_flights
+from tools.weather_tool import weather_report
 
 load_dotenv()
 
@@ -86,7 +87,10 @@ class TravelState(TypedDict, total=False):
     plan_summary: str        # one-line synopsis for the header card
     destination_image: str   # a photo of the destination for the header card
 
-    llm_calls: int
+    # Each node reports only the model calls it made, and they're summed. A plain value can't take two
+    # writes in one step, which is what flights, weather and the photo do when they run side by side.
+    # A run starts from Overwrite(0), so the count is per run rather than per thread
+    llm_calls: Annotated[int, operator.add]
 
 class Guardrail(BaseModel):
     allowed: bool = Field(description="True if the request asks for travel planning at all")
@@ -230,11 +234,23 @@ constraints_extractor = llm.with_structured_output(TripConstraints)
 # The specialists in the order they run; the supervisor picks a subset of these
 AGENT_ORDER = ["flight_agent", "weather_agent", "itinerary_agent", "hotel_agent", "budget_agent"]
 
+# These need only the trip details, so they run side by side at the start of a plan,
+# together with photo_agent, which fetches the header card's photo
+PARALLEL_AGENTS = ["flight_agent", "weather_agent"]
+
+# Each of these needs the one before it: the itinerary plans around the flights and weather, the
+# hotels are searched for the itinerary's overnight stays, and the budget is costed from both
+SEQUENTIAL_AGENTS = ["itinerary_agent", "hotel_agent", "budget_agent"]
+
 # Caps the hotel searches per trip, one search per stay
 MAX_STAYS = 5
 
 # How many hotels are shortlisted for each city the itinerary stays in
 HOTELS_PER_CITY = 2
+
+# How many hotel searches run at once. Each is a separate Tavily request that doesn't need another's
+# result, so running them together turns a wait per search into roughly one wait overall
+SEARCH_WORKERS = 6
 
 # Titles that mean the result is a list of hotels rather than a hotel
 LISTING_PAGE_HINTS = (
@@ -328,7 +344,7 @@ def get_database_connection():
 #         "messages": [
 #             AIMessage(content="Flight Results Fetched"),
 #         ],
-#         "llm_calls": state["llm_calls"]+1
+#         "llm_calls": 1
 #     }
 
 def supervisor_agent(state:TravelState):
@@ -399,7 +415,7 @@ def supervisor_agent(state:TravelState):
             "messages": [
                 AIMessage(content=f"Travel request accepted, running: {', '.join(selected)}"),
             ],
-            "llm_calls": state["llm_calls"]+2
+            "llm_calls": 2
         }
 
     refusal = (
@@ -415,7 +431,7 @@ def supervisor_agent(state:TravelState):
         "messages": [
             AIMessage(content=refusal),
         ],
-        "llm_calls": state["llm_calls"]+1
+        "llm_calls": 1
     }
 
 
@@ -451,7 +467,7 @@ def follow_up_supervisor(state:TravelState, user_query:str, existing_plan:str):
             "guardrail_reason": reason,
             "final_response": refusal,
             "messages": [AIMessage(content=refusal)],
-            "llm_calls": state["llm_calls"]+1
+            "llm_calls": 1
         }
 
     # A different trip: start over, but keep the finished plans in plan_history
@@ -466,7 +482,7 @@ def follow_up_supervisor(state:TravelState, user_query:str, existing_plan:str):
             "itinerary_days": [],
             "selected_agents": list(AGENT_ORDER),
             "messages": [AIMessage(content="New trip request, planning from scratch")],
-            "llm_calls": state["llm_calls"]+1
+            "llm_calls": 1
         }
 
     # A change to the existing plan: hand it to feedback_agent, the same path as the Request changes button.
@@ -488,21 +504,38 @@ def follow_up_supervisor(state:TravelState, user_query:str, existing_plan:str):
         "human_feedback": feedback,
         "feedback_history": feedback_history,
         "messages": [AIMessage(content="Reworking the plan you already have")],
-        "llm_calls": state["llm_calls"]+1
+        "llm_calls": 1
     }
 
 
-# The next agent the supervisor picked after this one, or the write-up when none are left
-def route_next(state:TravelState, current:str | None = None):
+# The next itinerary, hotel or budget agent the supervisor picked after `current`,
+# or the write-up when none are left
+def next_in_sequence(state:TravelState, current:str | None = None):
     selected = state.get("selected_agents") or AGENT_ORDER
-    start = AGENT_ORDER.index(current) + 1 if current else 0
+    start = SEQUENTIAL_AGENTS.index(current) + 1 if current else 0
 
-    for name in AGENT_ORDER[start:]:
+    for name in SEQUENTIAL_AGENTS[start:]:
         if name in selected:
             return name
 
     # Specialists done, so ask the traveller to approve the plan, unless approval is switched off
     return "hil_agent" if REQUIRE_APPROVAL else "final_response_agent"
+
+
+def start_planning(state:TravelState, with_photo:bool):
+    """The first step of a plan: flights, weather and the destination photo all at once, as each needs
+    only the trip details. Returning several names runs them side by side, and each routes on to the
+    same next agent, which LangGraph then runs once, after all of them have finished.
+
+    Only a new trip fetches the photo; a revision keeps the one it already has."""
+    selected = state.get("selected_agents") or AGENT_ORDER
+    first = [name for name in PARALLEL_AGENTS if name in selected]
+
+    # Even with no destination, so a new trip clears the previous trip's photo
+    if with_photo:
+        first.append("photo_agent")
+
+    return first or next_in_sequence(state)
 
 
 # Sends the workflow on to the chosen specialists, or stops it when the guardrail said no
@@ -540,7 +573,7 @@ def intake_agent(state:TravelState):
         return {
             **resolve_constraints(constraints),
             "intake_done": True,
-            "llm_calls": state["llm_calls"]+1
+            "llm_calls": 1
         }
 
     logger.info("intake_agent | asking for %s", [field["key"] for field in missing])
@@ -566,7 +599,7 @@ def intake_agent(state:TravelState):
         "messages": [
             AIMessage(content="Trip details noted"),
         ],
-        "llm_calls": state["llm_calls"]+1
+        "llm_calls": 1
     }
 
 
@@ -680,8 +713,15 @@ def flight_agent(state:TravelState):
         "messages": [
             AIMessage(content="Flight Results Fetched"),
         ],
-        "llm_calls": state["llm_calls"]+1
+        "llm_calls": 1
     }
+
+def photo_agent(state:TravelState):
+    """The header card's photo. It needs only the destination, so it runs alongside flights and weather
+    instead of after the write-up, where its image checks used to hold up the finished plan."""
+    destination = (state.get("trip_constraints") or {}).get("destination", "")
+    return {"destination_image": destination_photo(destination) if destination else ""}
+
 
 def weather_agent(state:TravelState):
     user_query = state.get("trip_request") or state["user_query"]
@@ -695,7 +735,7 @@ def weather_agent(state:TravelState):
 
     if destination and destination.city:
         logger.info("weather_agent | city=%s", destination.city)
-        weather_data = run_sync(get_weather(destination.city))
+        weather_data = weather_report(destination.city)
     else:
         weather_data = f"Couldn't work out the destination city from: {user_query}"
         logger.warning("weather_agent | no city found in %r", preview(user_query, 60))
@@ -707,7 +747,7 @@ def weather_agent(state:TravelState):
         "messages": [
             AIMessage(content="Weather Fetched"),
         ],
-        "llm_calls": state["llm_calls"]+1
+        "llm_calls": 1
     }
 
 def stay_location(stay:Stay):
@@ -757,7 +797,7 @@ def shortlist_hotels(stays:list, candidates:list, preference:str = ""):
     )
 
     chosen = {entry.stay_index: entry.hotels for entry in shortlist.stays} if shortlist else {}
-    picks = []
+    shortlisted = []  # (stay, hotel) pairs, in trip order
 
     for index, (stay, results) in enumerate(zip(stays, candidates)):
         allowed = {result["url"]: result for result in results}
@@ -780,22 +820,29 @@ def shortlist_hotels(stays:list, candidates:list, preference:str = ""):
                 seen.add(result["url"])
                 kept.append({"name": result["title"], "url": result["url"], "why": result["content"][:200]})
 
-        for hotel in kept[:HOTELS_PER_CITY]:
-            picks.append({
-                **hotel,
-                "url": resolve_hotel_link(hotel["name"], stay.city) or hotel["url"],
-                "city": stay.city,
-                "area": stay.area or "",
-                "nights": stay.nights or 0,
-            })
+        shortlisted += [(stay, hotel) for hotel in kept[:HOTELS_PER_CITY]]
 
-    return picks
+    # Each hotel's own page is a separate search, and none needs another's, so they run together
+    # rather than one after another. map() keeps them in the same order as the shortlist
+    with ThreadPoolExecutor(max_workers=SEARCH_WORKERS) as pool:
+        links = list(pool.map(lambda pair: resolve_hotel_link(pair[1]["name"], pair[0].city), shortlisted))
+
+    return [
+        {
+            **hotel,
+            "url": link or hotel["url"],
+            "city": stay.city,
+            "area": stay.area or "",
+            "nights": stay.nights or 0,
+        }
+        for (stay, hotel), link in zip(shortlisted, links)
+    ]
 
 
 def resolve_hotel_link(name:str, city:str):
     """The hotel's own page. Searching 'best hotels in X' returns round-up articles, not the hotels
     themselves, so the shortlisted name is looked up again to get a link that goes where it says."""
-    results = search_place(f"{name} {city} hotel", max_results=3).get("results") or []
+    results = search_place(f"{name} {city} hotel", max_results=3, include_images=False).get("results") or []
     return results[0]["url"] if results else None
 
 
@@ -850,13 +897,17 @@ def hotel_agent(state:TravelState):
 
     # This uses Tavily over REST, not MCP, because the shortlist needs each hotel's own link
     # and the MCP tool flattens its results into one block of text
-    candidates = []
-    for stay in stays:
-        location = stay_location(stay)
-        query = f"best hotels in {location}" + (f" for {preference}" if preference else "")
+    def search_stay(stay:Stay):
+        query = f"best hotels in {stay_location(stay)}" + (f" for {preference}" if preference else "")
         logger.info("hotel_agent | searching %r", query)
-        found = search_place(query, max_results=8)
-        candidates.append([result for result in found["results"] if result.get("url")])
+        # Links only: the preview panel fetches a hotel's photos itself when it's opened
+        found = search_place(query, max_results=8, include_images=False)
+        return [result for result in found["results"] if result.get("url")]
+
+    # One search per stay, and no stay's search needs another's, so they run together.
+    # map() keeps the results in trip order, which the shortlist relies on
+    with ThreadPoolExecutor(max_workers=SEARCH_WORKERS) as pool:
+        candidates = list(pool.map(search_stay, stays))
 
     picks = shortlist_hotels(stays, candidates, preference)
     logger.info("hotel_agent | shortlisted %s hotels across %s stays", len(picks), len(stays))
@@ -867,7 +918,8 @@ def hotel_agent(state:TravelState):
         "messages": [
             AIMessage(content="Hotel Results Fetched"),
         ],
-        "llm_calls": state["llm_calls"]+1
+        # One call reads the stays out of the itinerary, the other picks the hotels
+        "llm_calls": 2
     }
 
 
@@ -950,7 +1002,7 @@ Traveller's feedback so far, most recent last:
         "messages": [
             AIMessage(content=itinerary),
         ],
-        "llm_calls": state["llm_calls"]+1
+        "llm_calls": 1
     }
 
 def cost_summary(estimate):
@@ -1022,7 +1074,7 @@ Itinerary:
         "messages": [
             AIMessage(content="Budget Analysed"),
         ],
-        "llm_calls": state["llm_calls"]+1
+        "llm_calls": 1
     }
 
 def hil_agent(state:TravelState):
@@ -1110,7 +1162,7 @@ def feedback_agent(state:TravelState):
         "messages": [
             AIMessage(content=f"Reworking the plan: {', '.join(selected) if selected else 'rewriting the write-up'}"),
         ],
-        "llm_calls": state["llm_calls"]+1
+        "llm_calls": 1
     }
 
 
@@ -1129,7 +1181,7 @@ def route_after_hil(state:TravelState):
 # Re-run the chosen specialists, or go straight to the write-up when the feedback is only about wording
 def route_after_feedback(state:TravelState):
     if state.get("selected_agents"):
-        return route_next(state)
+        return start_planning(state, with_photo=False)
     return "final_response_agent"
 
 
@@ -1204,21 +1256,17 @@ Traveller's feedback on the plan:
             "planning, so that part isn't something I can put in an itinerary.*"
         )
 
-    destination = (state.get("trip_constraints") or {}).get("destination", "")
-    image = destination_photo(destination) if destination else ""
-
     # Keep the last few finished plans, so a follow-up in this thread has something to build on
     plan_history = [*state.get("plan_history", [])[-2:], f"Request: {user_query}\n\nPlan:\n{itinerary}"]
 
     return {
         "final_response": final_response,
         "plan_summary": summary,
-        "destination_image": image,
         "plan_history": plan_history,
         "messages": [
             AIMessage(content=final_response),
         ],
-        "llm_calls": state["llm_calls"]+1
+        "llm_calls": 1
     }
 
 graph = StateGraph(TravelState)
@@ -1228,6 +1276,7 @@ graph.add_node("intake_agent", intake_agent)
 graph.add_node("flight_agent", flight_agent)
 graph.add_node("hotel_agent", hotel_agent)
 graph.add_node("weather_agent",weather_agent)
+graph.add_node("photo_agent", photo_agent)
 graph.add_node("itinerary_agent", itinerary_agent)
 graph.add_node("budget_agent", budget_agent)
 graph.add_node("hil_agent", hil_agent)
@@ -1242,19 +1291,34 @@ graph.add_conditional_edges(
     ["intake_agent", "feedback_agent", END],
 )
 
-# Planning starts once the trip details are in
-graph.add_conditional_edges("intake_agent", route_next, [*AGENT_ORDER, "hil_agent", "final_response_agent"])
+AFTER_SPECIALISTS = ["hil_agent", "final_response_agent"]
 
-# Each specialist hands over to the next one the supervisor picked, skipping the rest
-for agent_name in AGENT_ORDER:
+# Planning starts once the trip details are in, with flights, weather and the photo side by side
+graph.add_conditional_edges(
+    "intake_agent",
+    partial(start_planning, with_photo=True),
+    [*PARALLEL_AGENTS, "photo_agent", *SEQUENTIAL_AGENTS, *AFTER_SPECIALISTS],
+)
+
+# Each of those routes to the same next agent. Conditional edges, not add_edge([...], target):
+# that form waits for every listed node, so it would hang when the supervisor skipped flights
+for agent_name in [*PARALLEL_AGENTS, "photo_agent"]:
+    graph.add_conditional_edges(agent_name, next_in_sequence, [*SEQUENTIAL_AGENTS, *AFTER_SPECIALISTS])
+
+# Then the itinerary, hotels and budget in turn, skipping any the supervisor didn't pick
+for agent_name in SEQUENTIAL_AGENTS:
     graph.add_conditional_edges(
         agent_name,
-        partial(route_next, current=agent_name),
-        [*AGENT_ORDER, "hil_agent", "final_response_agent"],
+        partial(next_in_sequence, current=agent_name),
+        [*SEQUENTIAL_AGENTS, *AFTER_SPECIALISTS],
     )
 
 graph.add_conditional_edges("hil_agent", route_after_hil, ["feedback_agent", "final_response_agent"])
-graph.add_conditional_edges("feedback_agent", route_after_feedback, [*AGENT_ORDER, "final_response_agent"])
+graph.add_conditional_edges(
+    "feedback_agent",
+    route_after_feedback,
+    [*PARALLEL_AGENTS, *SEQUENTIAL_AGENTS, *AFTER_SPECIALISTS],
+)
 graph.add_edge("final_response_agent", END)
 
 DATABASE_URL = get_database_connection()
@@ -1280,6 +1344,9 @@ def _config(thread_id:str):
 def _initial_state(query:str):
     # Only this run's bookkeeping is reset. The previous run's trip_request, itinerary and other
     # results stay in the thread's checkpoint, so a follow-up can build on the plan already made.
+    # That includes trip_constraints and assumed_constraints: a follow-up that refines the plan
+    # skips intake, so wiping them would leave the revision without the trip's budget or dates and
+    # drop the plan's header card. A new trip always goes through intake, which replaces both.
     return {
         "messages": [HumanMessage(content=query)],
         "user_query": query,
@@ -1290,8 +1357,6 @@ def _initial_state(query:str):
         "guardrail_allowed": False,
         "guardrail_reason": "",
         "selected_agents": [],
-        "trip_constraints": {},
-        "assumed_constraints": [],
         "supervisor_reasoning": "",
         "off_topic_request": "",
 
@@ -1304,7 +1369,8 @@ def _initial_state(query:str):
         "replan_reasoning": "",
         "final_response": "",
 
-        "llm_calls": 0,
+        # Replaces the count rather than adding to it, so each run starts from zero
+        "llm_calls": Overwrite(0),
     }
 
 

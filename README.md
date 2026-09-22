@@ -11,7 +11,7 @@ Built with [LangGraph](https://langchain-ai.github.io/langgraph/), Google Gemini
    ↓
    asks for the dates and vibe you didn't mention
    ↓
-   flights → weather → itinerary → hotels → budget
+   flights + weather + photo at once → itinerary → hotels → budget
    ↓
    a plan, rendered as cards
    ↓
@@ -76,7 +76,9 @@ A LangGraph `StateGraph` with a Postgres checkpointer. Every node reads and writ
         │                           │
         └─────────────┬─────────────┘
                       ▼
-   flight_agent → weather_agent → itinerary_agent → hotel_agent → budget_agent
+   flight_agent  ─┐
+   weather_agent ─┼─► itinerary_agent → hotel_agent → budget_agent
+   photo_agent   ─┘
                       │
                       ▼
             final_response_agent ──► END
@@ -87,7 +89,8 @@ A LangGraph `StateGraph` with a Postgres checkpointer. Every node reads and writ
 | `supervisor_agent` | Guardrails non-travel requests, and decides whether a message starts a new trip or refines the current one |
 | `intake_agent` | Extracts the trip's terms from your message, then `interrupt()`s to ask for what's missing |
 | `flight_agent` | Live flight schedules for the route, via AviationStack |
-| `weather_agent` | Current conditions and a 5-day forecast, via a local MCP server |
+| `weather_agent` | Current conditions and a 5-day forecast from OpenWeather, both fetched at once |
+| `photo_agent` | Finds a photo of the destination for the plan's header card |
 | `itinerary_agent` | Writes the day-by-day plan as structured days and activities |
 | `hotel_agent` | Finds two hotels per city the itinerary stays in, and resolves each to its own page |
 | `budget_agent` | Costs the trip line by line and judges it against your budget |
@@ -95,8 +98,15 @@ A LangGraph `StateGraph` with a Postgres checkpointer. Every node reads and writ
 | `final_response_agent` | Combines everything into the written plan, plus a one-line summary |
 | `hil_agent` | An optional approve/request-changes gate, off by default (see below) |
 
-Only the specialists the supervisor selected actually run — `route_next` walks a fixed order and
-skips the rest, so a weather-only question doesn't search for hotels.
+Flights, weather and the photo need only the trip's details, so `start_planning` sends them out
+together and LangGraph runs the itinerary once all of them have finished. The itinerary, hotels and
+budget then run in turn, because each needs the one before: hotels are searched for the cities the
+itinerary stays in. Only the specialists the supervisor selected run at all, so a weather-only
+question doesn't search for hotels.
+
+The join is a conditional edge from each parallel agent to the same next node, not
+`add_edge([...], target)`: that form waits for every listed node, so it would hang on a trip where
+the supervisor skipped flights.
 
 ---
 
@@ -116,10 +126,13 @@ the search results is dropped rather than shown.
 "71% of budget" figure is divided in Python. Asking a model for a percentage gets you arithmetic
 that looks authoritative and is sometimes wrong.
 
-**Tavily over both MCP and REST.** The general search runs through Tavily's MCP server. Hotel search
-and the link preview use its REST API instead, because the MCP adapter flattens results into one
-block of text — which loses the per-result URLs the hotel cards need — and opens a fresh session per
-call, costing about 6 seconds against roughly 1 second for REST.
+**MCP is available, but not on the hot path.** The repo has a FastMCP weather server
+(`custom_weather_mcp.py`) and an MCP client for it and for Tavily (`mcp_client.py`), but the agents
+call the underlying tools directly. The MCP adapter opens a fresh session for every call, which for a
+stdio server means starting a new Python subprocess: a weather lookup measured 3.4 s that way against
+0.2 s calling the same function in-process. The server wraps the same functions the agent uses
+(`tools/weather_tool.py`), so both stay in step. Tavily goes over REST for a second reason too: its MCP
+tool flattens results into one block of text, which loses the per-result URLs the hotel cards need.
 
 **Search results are filtered before they're shown.** Hotel searches return round-up articles as
 often as hotels, so a title like "The 10 best hotels in Zurich" never becomes a hotel card.
@@ -177,7 +190,7 @@ All of it comes from a `.env` at the repo root.
 | `GEMINI_API_KEY` | yes | Every LLM call, via `gemini-2.5-flash-lite` |
 | `TAVILY_API_KEY` | yes | Web search: hotels, places and link previews |
 | `AVIATIONSTACK_API_KEY` | yes | Live flight schedules |
-| `OPENWEATHER_API_KEY` | yes | The weather MCP server |
+| `OPENWEATHER_API_KEY` | yes | Current weather and the forecast, for the agent and the weather MCP server |
 | `POSTGRES_DB` | yes | Connection string for the LangGraph checkpointer |
 | `DEFAULT_ORIGIN` | no | Fallback departure airport, default `DEL` |
 | `DEFAULT_ORIGIN_CITY` | no | Fallback departure city, shown in intake options |
@@ -221,10 +234,11 @@ A finished response carries `final_response` (Markdown) alongside `brief`, `head
 backend/
   agent.py              the graph: state, agents, routing, structured output
   app.py                FastAPI endpoints, including the SSE streams
-  mcp_client.py         MCP clients for Tavily, AviationStack and weather
-  custom_weather_mcp.py a FastMCP server wrapping OpenWeather
+  mcp_client.py         MCP clients for Tavily and the weather server (not on the request path)
+  custom_weather_mcp.py a FastMCP server exposing the weather tool
   place_preview.py      cached Tavily REST search for previews and hotels
   tools/flight_tool.py  AviationStack flight lookup
+  tools/weather_tool.py OpenWeather current conditions and forecast
 frontend/src/
   components/           chat UI: the plan cards, composer, sidebar, link sheet
   lib/api.ts            typed client for the backend, and the SSE reader
