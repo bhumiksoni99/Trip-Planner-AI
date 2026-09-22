@@ -551,6 +551,37 @@ def route_after_supervisor(state:TravelState):
     return "intake_agent"
 
 
+# The three extraction calls below live in their own functions so evals/ can score the exact
+# prompts the agents use, without the pause, weather request or hotel searches around them
+
+def extract_constraints(trip_request:str):
+    """The trip's details as stated in the request, with null for anything it doesn't say"""
+    return constraints_extractor.invoke(
+        "Pull the trip details out of this travel request. Use null for anything it doesn't say; never guess.\n\n"
+        f"Request: {trip_request}"
+    )
+
+
+def extract_destination_city(trip_request:str):
+    """The main city the trip goes to, for the weather lookup, or None if the request names no destination"""
+    destination = destination_extractor.invoke(
+        "Name the main destination city of this travel request.\n"
+        "Give a city, not a country (e.g. Japan -> Tokyo, Spain -> Madrid).\n"
+        "Use null if no destination is mentioned.\n\n"
+        f"Request: {trip_request}"
+    )
+    return destination.city if destination else None
+
+
+def extract_stays(itinerary:str):
+    """Every place the itinerary stays overnight, in trip order"""
+    result = stay_extractor.invoke(
+        "List every place the traveller stays overnight in this itinerary, in trip order.\n\n"
+        f"Itinerary:\n{itinerary}"
+    )
+    return result.stays if result else []
+
+
 def intake_agent(state:TravelState):
     """Ask the traveller for the trip details their request didn't mention, before any planning starts"""
     # Follow-ups refine an existing plan, so they never get asked
@@ -559,10 +590,7 @@ def intake_agent(state:TravelState):
 
     trip_request = state.get("trip_request") or state["user_query"]
 
-    found = constraints_extractor.invoke(
-        "Pull the trip details out of this travel request. Use null for anything it doesn't say; never guess.\n\n"
-        f"Request: {trip_request}"
-    )
+    found = extract_constraints(trip_request)
     # Every field the extractor returns, not just the ones asked as questions, so destination is kept too
     constraints = {key: (getattr(found, key, None) or "").strip() for key in TripConstraints.model_fields} if found else {}
 
@@ -726,16 +754,11 @@ def photo_agent(state:TravelState):
 def weather_agent(state:TravelState):
     user_query = state.get("trip_request") or state["user_query"]
 
-    destination = destination_extractor.invoke(
-        "Name the main destination city of this travel request.\n"
-        "Give a city, not a country (e.g. Japan -> Tokyo, Spain -> Madrid).\n"
-        "Use null if no destination is mentioned.\n\n"
-        f"Request: {user_query}"
-    )
+    city = extract_destination_city(user_query)
 
-    if destination and destination.city:
-        logger.info("weather_agent | city=%s", destination.city)
-        weather_data = weather_report(destination.city)
+    if city:
+        logger.info("weather_agent | city=%s", city)
+        weather_data = weather_report(city)
     else:
         weather_data = f"Couldn't work out the destination city from: {user_query}"
         logger.warning("weather_agent | no city found in %r", preview(user_query, 60))
@@ -882,11 +905,7 @@ def hotel_agent(state:TravelState):
     itinerary = state.get("itinerary", "")
     preference = stay_preference(state)
 
-    result = stay_extractor.invoke(
-        "List every place the traveller stays overnight in this itinerary, in trip order.\n\n"
-        f"Itinerary:\n{itinerary}"
-    )
-    stays = result.stays if result else []
+    stays = extract_stays(itinerary)
 
     stays = stays[:MAX_STAYS]
     logger.info("hotel_agent | stays=%s", [stay.city for stay in stays] or "none found")
