@@ -152,8 +152,10 @@ def score_replan(out: dict, expect: dict):
         results.append(("off_topic", present(out["off_topic"]) == expect["off_topic"], f"got {out['off_topic']!r}"))
 
     if "trip_request_contains" in expect and not out["is_refinement"]:
-        ok = any(term in norm(out["trip_request"]) for term in expect["trip_request_contains"])
-        results.append(("new_trip", ok, f"trip_request {out['trip_request']!r}"))
+        # The new trip has to be written out, not the message repeated: intake plans from this text
+        names_place = any(term in norm(out["trip_request"]) for term in expect["trip_request_contains"])
+        written_out = norm(out["trip_request"]) != norm(out.get("message"))
+        results.append(("new_trip", names_place and written_out, f"trip_request {out['trip_request']!r}"))
 
     # Only scored when it was treated as a change; a misread new trip already fails is_refinement
     if "rerun" in expect and out["is_refinement"]:

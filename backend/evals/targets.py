@@ -64,6 +64,7 @@ def replan(inputs: dict) -> dict:
 
     decided = agent.supervisor_agent(state)
     result = {
+        "message": inputs["message"],
         "is_travel": decided["guardrail_allowed"],
         "is_refinement": bool(decided.get("is_refinement")),
         "off_topic": decided.get("off_topic_request", ""),

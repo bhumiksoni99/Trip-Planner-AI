@@ -31,8 +31,9 @@ def get_route(query: str) -> Route:
     prompt = (
         "Extract the departure and arrival airports from this travel request as 3-letter IATA codes.\n"
         "For a country or city, use its main international airport (e.g. India -> DEL, London -> LHR).\n"
+        "If the trip covers several places or countries, use the airport the traveller would fly into first.\n"
         f"If no departure place is mentioned, use {DEFAULT_ORIGIN}.\n"
-        "Use null if the destination can't be determined.\n\n"
+        "Use null only if the request names no destination at all.\n\n"
         f"Request: {query}"
     )
     return route_extractor.invoke(prompt)

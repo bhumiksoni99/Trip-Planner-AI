@@ -153,11 +153,12 @@ events, _ = run("t1", "make the hotels cheaper", list(agent.AGENT_ORDER))
 names = started(events)
 done = events[-1]["data"]
 header = done.get("header") or {}
-check("reworks itinerary and hotels only", {"itinerary_agent", "hotel_agent"} <= set(names) and not {"flight_agent", "weather_agent"} & set(names), str(names))
+check("re-searches hotels and keeps the itinerary", "hotel_agent" in names and not {"itinerary_agent", "flight_agent", "weather_agent"} & set(names), str(names))
 check("doesn't fetch the photo again", "photo_agent" not in names and calls["photo_api"] == 0)
 check("keeps its header card and photo", header.get("destination") == "Tokyo" and header.get("image") == "https://example.com/tokyo.jpg")
 check("keeps its brief", any(t["label"] == "Budget" for t in done.get("brief", [])))
-check("llm_calls counts this run only", done["llm_calls"] == 6, f"got {done['llm_calls']}")
+# intent 1 + feedback 1 + hotels 2 (stays and shortlist) + write-up 1
+check("llm_calls counts this run only", done["llm_calls"] == 5, f"got {done['llm_calls']}")
 
 print("\n5. Follow-up that asks for a different trip in the same thread")
 agent.intent_classifier = Fake("intent", agent.MessageIntent(is_travel=True, is_refinement=False, trip_request="3 days in Paris", travel_change=None, off_topic=None, reason="new trip"))
@@ -167,6 +168,15 @@ events, _ = run("t1", "actually, 3 days in Paris instead", list(agent.AGENT_ORDE
 header = events[-1]["data"].get("header") or {}
 check("gets its own terms, not the previous trip's", header.get("destination") == "Paris" and header.get("origin") == "Mumbai")
 check("fetches its own photo", header.get("image") == "https://example.com/paris.jpg")
+
+print("\n6. A hotels-only question on a new thread")
+searched = []
+agent.search_place = slow("tavily", lambda query, *_: searched.append(query) or fake_search(query))
+events, _ = run("t6", "recommend hotels in Tokyo", ["hotel_agent"])
+names = started(events)
+check("no itinerary is written for it", "itinerary_agent" not in names, str(names))
+check("searches the destination, not the whole sentence", any(query.startswith("best hotels in Tokyo") for query in searched), str(searched[:2]))
+check("skips the stays call when there's no itinerary", calls["stays"] == 0)
 
 print(f"\n{'ALL PASSED' if not failures else f'{len(failures)} FAILED: {failures}'}")
 sys.exit(1 if failures else 0)
