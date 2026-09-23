@@ -1,5 +1,17 @@
 import { useSyncExternalStore } from "react";
-import type { BriefTerm, PlanCosts, PlanDay, PlanHeader, PlanHotel } from "./api";
+import {
+  claimChats,
+  deleteChat,
+  listChats,
+  loadChat,
+  type BriefTerm,
+  type ChatDetail,
+  type ChatSummary,
+  type PlanCosts,
+  type PlanDay,
+  type PlanHeader,
+  type PlanHotel,
+} from "./api";
 
 export type Message = {
   id: string;
@@ -24,64 +36,125 @@ export type Thread = {
   title: string;
   messages: Message[];
   updatedAt: number;
+  // Its messages have been fetched, rather than being a sidebar entry we haven't opened yet
+  loaded?: boolean;
+  // Started in this tab and not planned yet, so the server has never heard of it
+  local?: boolean;
 };
 
-// Threads live in this browser's localStorage; the backend has no endpoint to list them yet
-const STORAGE_KEY = "itinera:threads";
-// Where threads were saved before the rename; moved to STORAGE_KEY on first load
-const OLD_STORAGE_KEY = "tripmate:threads";
+// The chats themselves live in Postgres, under the same id LangGraph checkpoints them with. A guest's
+// browser only remembers which chats it started, so the sidebar can list them; every message is loaded
+// from the database. A logged-in traveller's list comes from the server instead.
+const GUEST_KEY = "itinera:guest-chats";
+// Where whole chats used to be copied before the database became the only source
+const COPY_KEYS = ["itinera:threads", "tripmate:threads"];
+
 const NO_THREADS: Thread[] = [];
 const listeners = new Set<() => void>();
-let threads: Thread[] | null = null;
 
-function load(): Thread[] {
+let threads: Thread[] = NO_THREADS;
+let signedInAs: string | null = null;
+let started = false;
+
+function announce() {
+  listeners.forEach((listener) => listener());
+}
+
+function setThreads(next: Thread[]) {
+  threads = next;
+  announce();
+}
+
+function guestList(): ChatSummary[] {
   try {
-    const old = localStorage.getItem(OLD_STORAGE_KEY);
-    if (old !== null) {
-      if (localStorage.getItem(STORAGE_KEY) === null) localStorage.setItem(STORAGE_KEY, old);
-      localStorage.removeItem(OLD_STORAGE_KEY);
+    const saved = localStorage.getItem(GUEST_KEY);
+    if (saved) return JSON.parse(saved) as ChatSummary[];
+
+    // Chats from before the database was the source: keep their ids and titles, drop the copied
+    // messages. The conversations themselves are already saved under the same ids
+    for (const key of COPY_KEYS) {
+      const copies = localStorage.getItem(key);
+      if (!copies) continue;
+      const list = (JSON.parse(copies) as Thread[]).map(({ id, title, updatedAt }) => ({ id, title, updatedAt }));
+      saveGuestList(list);
+      COPY_KEYS.forEach((old) => localStorage.removeItem(old));
+      return list;
     }
-    const saved = localStorage.getItem(STORAGE_KEY);
-    return saved ? (JSON.parse(saved) as Thread[]) : [];
   } catch {
-    return [];
+    // Unreadable or blocked storage; the guest simply starts with an empty sidebar
+  }
+  return [];
+}
+
+function saveGuestList(list: ChatSummary[]) {
+  try {
+    localStorage.setItem(GUEST_KEY, JSON.stringify(list));
+  } catch {
+    // Storage can be full or blocked; the chats still work for this session
   }
 }
 
+function asThreads(list: ChatSummary[]): Thread[] {
+  // Keep whatever we've already loaded, so switching chats doesn't refetch every time
+  const loaded = new Map(threads.map((thread) => [thread.id, thread]));
+  return list.map(({ id, title, updatedAt }) => {
+    const known = loaded.get(id);
+    return { id, title, updatedAt, messages: known?.messages ?? [], loaded: known?.loaded };
+  });
+}
+
+/** Reloads the sidebar: the account's chats when logged in, this browser's list when not. */
+export async function refreshThreads() {
+  if (!signedInAs) {
+    setThreads(asThreads(guestList()));
+    return;
+  }
+
+  try {
+    setThreads(asThreads(await listChats()));
+  } catch {
+    // Offline or a failed request: leave the list as it is rather than emptying the sidebar
+  }
+}
+
+/** Tells the store who is logged in. Called by the app whenever that changes. */
+export function setAccount(userId: string | null) {
+  if (signedInAs === userId && started) return;
+  signedInAs = userId;
+  started = true;
+  threads = NO_THREADS;
+  void refreshThreads();
+}
+
+/** Hands this browser's guest chats to the account just logged into. */
+export async function claimGuestChats() {
+  const list = guestList();
+  if (!list.length) return;
+
+  try {
+    await claimChats(list.map((chat) => chat.id));
+    saveGuestList([]);
+    await refreshThreads();
+  } catch {
+    // Kept for the next attempt; claiming the same chats twice is harmless
+  }
+}
+
+function subscribe(listener: () => void) {
+  listeners.add(listener);
+  if (!started) {
+    started = true;
+    void refreshThreads();
+  }
+  return () => listeners.delete(listener);
+}
+
 function getSnapshot() {
-  threads ??= load();
   return threads;
 }
 
 function getServerSnapshot() {
   return NO_THREADS;
-}
-
-function subscribe(listener: () => void) {
-  listeners.add(listener);
-
-  // Pick up changes made in other tabs
-  function handleStorage(event: StorageEvent) {
-    if (event.key !== STORAGE_KEY) return;
-    threads = load();
-    listener();
-  }
-  window.addEventListener("storage", handleStorage);
-
-  return () => {
-    listeners.delete(listener);
-    window.removeEventListener("storage", handleStorage);
-  };
-}
-
-function update(change: (current: Thread[]) => Thread[]) {
-  threads = change(getSnapshot());
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(threads));
-  } catch {
-    // Storage can be full or blocked; the threads still work for this session
-  }
-  listeners.forEach((listener) => listener());
 }
 
 export function useThreads() {
@@ -94,31 +167,66 @@ export function newId() {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+function titleOf(message: string) {
+  return message.length > 60 ? `${message.slice(0, 57).trimEnd()}…` : message;
+}
+
 export function createThread(firstMessage: string): string {
   const id = newId();
-  const title = firstMessage.length > 60 ? `${firstMessage.slice(0, 57).trimEnd()}…` : firstMessage;
-  update((current) => [{ id, title, messages: [], updatedAt: Date.now() }, ...current]);
+  const thread: Thread = { id, title: titleOf(firstMessage), messages: [], updatedAt: Date.now(), loaded: true, local: true };
+  setThreads([thread, ...threads]);
+
+  // A guest's browser is the only record of which chats are theirs. A logged-in traveller's chat is
+  // recorded by the backend when the plan starts
+  if (!signedInAs) saveGuestList([{ id, title: thread.title, updatedAt: thread.updatedAt }, ...guestList()]);
+
   return id;
 }
 
-export function addMessage(threadId: string, message: Omit<Message, "id">) {
-  update((current) =>
-    current.map((thread) =>
-      thread.id === threadId
-        ? { ...thread, messages: [...thread.messages, { ...message, id: newId() }], updatedAt: Date.now() }
-        : thread,
-    ),
-  );
+function change(threadId: string, update: (thread: Thread) => Thread) {
+  setThreads(threads.map((thread) => (thread.id === threadId ? update(thread) : thread)));
+}
+
+export function addMessage(threadId: string, message: Omit<Message, "id"> & { id?: string }) {
+  change(threadId, (thread) => ({
+    ...thread,
+    messages: [...thread.messages, { ...message, id: message.id ?? newId() }],
+    updatedAt: Date.now(),
+  }));
 }
 
 export function removeLastMessage(threadId: string) {
-  update((current) =>
-    current.map((thread) =>
-      thread.id === threadId ? { ...thread, messages: thread.messages.slice(0, -1) } : thread,
-    ),
-  );
+  change(threadId, (thread) => ({ ...thread, messages: thread.messages.slice(0, -1) }));
 }
 
-export function deleteThread(threadId: string) {
-  update((current) => current.filter((thread) => thread.id !== threadId));
+/** Fetches a chat's messages, and whatever question it is paused on, from the database. */
+export async function loadThread(threadId: string): Promise<ChatDetail | null> {
+  const detail = await loadChat(threadId);
+
+  if (!detail) {
+    // Gone, or someone else's
+    setThreads(threads.filter((thread) => thread.id !== threadId));
+    if (!signedInAs) saveGuestList(guestList().filter((chat) => chat.id !== threadId));
+    return null;
+  }
+
+  change(threadId, (thread) => ({ ...thread, title: detail.title, messages: detail.messages, updatedAt: detail.updatedAt, loaded: true, local: false }));
+  return detail;
+}
+
+export async function deleteThread(threadId: string) {
+  const previous = threads;
+  setThreads(threads.filter((thread) => thread.id !== threadId));
+
+  if (!signedInAs) {
+    saveGuestList(guestList().filter((chat) => chat.id !== threadId));
+    return;
+  }
+
+  try {
+    await deleteChat(threadId);
+  } catch (error) {
+    setThreads(previous); // put it back, since it's still there
+    throw error;
+  }
 }

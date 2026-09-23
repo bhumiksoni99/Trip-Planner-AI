@@ -8,8 +8,6 @@ import requests
 import operator
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
-import psycopg
-from psycopg.rows import dict_row
 from pydantic import BaseModel, Field, ValidationError
 
 from langgraph.graph import StateGraph, START, END
@@ -17,6 +15,7 @@ from langgraph.types import interrupt, Command, Overwrite
 from langgraph.checkpoint.postgres import PostgresSaver
 from langchain_core.exceptions import OutputParserException
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, AnyMessage
+from db import pool
 from place_preview import search_place
 from tools.flight_tool import flights_between, search_flights
 from tools.weather_tool import weather_report
@@ -44,7 +43,13 @@ def preview(text, length: int = 120):
     text = str(text).replace("\n", " ")
     return text[:length] + "…" if len(text) > length else text
 
-llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", api_key=GEMINI_API_KEY)
+# The SDK already retries rate limits and server errors (6 times, with backoff). The timeout stops one
+# hung request from holding a plan forever; without it the HTTP client waits indefinitely
+llm = ChatGoogleGenerativeAI(
+    model="gemini-2.5-flash-lite",
+    api_key=GEMINI_API_KEY,
+    timeout=float(os.getenv("GEMINI_TIMEOUT_SECONDS", "60")),
+)
 
 class TravelState(TypedDict, total=False):
     messages: Annotated[list[AnyMessage], operator.add]
@@ -404,12 +409,6 @@ REQUIRE_APPROVAL = os.getenv("REQUIRE_APPROVAL", "false").lower() == "true"
 # How many times the traveller can send the plan back before the write-up is forced
 MAX_REVISIONS = int(os.getenv("MAX_REVISIONS", "3"))
 
-def get_database_connection():
-    database_url = os.getenv("POSTGRES_DB")
-    if not database_url:
-        raise ValueError("POSTGRES_DB is missing.")
-    return database_url
-
 # def flight_agent(state:TravelState):
 #     user_query = state["user_query"]
 #     flight_data = get_fl(user_query)
@@ -510,7 +509,7 @@ def supervisor_agent(state:TravelState):
         "guardrail_reason": reason,
         "final_response": refusal,
         "messages": [
-            AIMessage(content=refusal),
+            reply_message(refusal),
         ],
         "llm_calls": 1
     }
@@ -555,7 +554,7 @@ def follow_up_supervisor(state:TravelState, user_query:str, existing_plan:str):
             "guardrail_allowed": False,
             "guardrail_reason": reason,
             "final_response": refusal,
-            "messages": [AIMessage(content=refusal)],
+            "messages": [reply_message(refusal)],
             "llm_calls": 1
         }
 
@@ -723,11 +722,13 @@ def intake_agent(state:TravelState):
         "questions": [{**field, "value": constraints.get(field["key"], "")} for field in missing],
     })
 
+    given = []
     if isinstance(answers, dict) and not answers.get("skipped"):
         for field in INTAKE_FIELDS:
             answer = str(answers.get(field["key"], "") or "").strip()
             if answer:
                 constraints[field["key"]] = answer
+                given.append(f"{field['key'].replace('_', ' ')}: {answer}")
 
         # The request didn't name a departure, so any airport the model filled in was a guess.
         # Clear it, and flight_agent looks up the city the traveller actually gave
@@ -736,10 +737,15 @@ def intake_agent(state:TravelState):
 
     logger.info("intake_agent | answered: %s", {k: v for k, v in constraints.items() if v})
 
+    # The answers were the traveller's turn in the conversation, so they're kept as one, the same way
+    # the chat shows them. Without this the chat would rebuild with the questions but not the answers
+    answered = [HumanMessage(content="\n".join(given))] if given else []
+
     return {
         **resolve_constraints(constraints),
         "intake_done": True,
         "messages": [
+            *answered,
             AIMessage(content="Trip details noted"),
         ],
         "llm_calls": 1
@@ -1299,12 +1305,16 @@ def hil_agent(state:TravelState):
     if feedback and not approved:
         feedback_history = [*feedback_history, feedback]
 
+    # Asking for changes was the traveller's turn, so it's kept as one, like any other message
+    asked = [HumanMessage(content=feedback)] if feedback and not approved else []
+
     return {
         "approval_request": approval_request,
         "approved": approved,
         "human_feedback": feedback,
         "feedback_history": feedback_history,
         "messages": [
+            *asked,
             AIMessage(content="Plan approved" if approved else f"Changes requested: {feedback}"),
         ],
     }
@@ -1448,8 +1458,10 @@ Traveller's feedback on the plan:
         "final_response": final_response,
         "plan_summary": summary,
         "plan_history": plan_history,
+        # Tagged as a reply, with its cards, so the chat can be rebuilt from this thread's checkpoint.
+        # The state itself keeps only the newest plan's cards
         "messages": [
-            AIMessage(content=final_response),
+            reply_message(final_response, {**state, "plan_summary": summary}),
         ],
         "llm_calls": 1
     }
@@ -1509,14 +1521,8 @@ graph.add_conditional_edges(
 )
 graph.add_edge("final_response_agent", END)
 
-DATABASE_URL = get_database_connection()
-_conn = psycopg.connect(
-    DATABASE_URL,
-    autocommit=True,
-    row_factory=dict_row
-)
-
-checkpointer = PostgresSaver(_conn)
+# The pool is shared with the app's users and chats tables, see db.py
+checkpointer = PostgresSaver(pool)
 checkpointer.setup()
 
 travel_graph = graph.compile(checkpointer=checkpointer)
@@ -1652,6 +1658,74 @@ def _progress_events(stream, thread_id:str, config:dict):
     yield {"event": "done", "data": result}
 
 
+def reply_message(text:str, state:dict | None = None):
+    """An answer the traveller sees, as opposed to the notes agents leave each other ("Weather Fetched").
+    chat_messages keeps these and drops the rest, which is how a chat is rebuilt from its checkpoint."""
+    payload = plan_payload(state) if state else {}
+    return AIMessage(name="reply", content=text, additional_kwargs={"payload": payload})
+
+
+def title_of(message:str):
+    """A chat's title: its first message, cut short. The same rule the sidebar used to apply itself"""
+    message = " ".join(message.split())
+    return message if len(message) <= 60 else message[:57].rstrip() + "…"
+
+
+def chat_messages(thread_id:str):
+    """The conversation as the UI shows it, rebuilt from this chat's checkpoint.
+
+    The state's message list also holds the notes agents leave each other ("Weather Fetched"), so only
+    the traveller's messages and the tagged replies are kept."""
+    state = travel_graph.get_state(_config(thread_id)).values
+    messages = state.get("messages") or []
+    chat = []
+
+    for position, message in enumerate(messages):
+        identifier = f"{thread_id}-{position}"
+        if isinstance(message, HumanMessage):
+            chat.append({"id": identifier, "role": "user", "content": message.content})
+        elif getattr(message, "name", None) == "reply":
+            payload = (getattr(message, "additional_kwargs", None) or {}).get("payload") or {}
+            chat.append({"id": identifier, "role": "assistant", "content": message.content, **payload})
+
+    # Chats planned before replies were tagged have none, so their last plan is shown on its own
+    if state.get("final_response") and not any(message["role"] == "assistant" for message in chat):
+        chat.append({
+            "id": f"{thread_id}-plan",
+            "role": "assistant",
+            "content": state["final_response"],
+            **plan_payload(state),
+        })
+
+    return chat
+
+
+def pending_pause(thread_id:str):
+    """The question this chat is waiting on, if it paused at intake or approval, otherwise None"""
+    snapshot = travel_graph.get_state(_config(thread_id))
+    return snapshot.interrupts[0].value if snapshot.interrupts else None
+
+
+def forget_thread(thread_id:str):
+    """Delete the chat's checkpoints, so a deleted chat leaves nothing behind"""
+    travel_graph.checkpointer.delete_thread(thread_id)
+
+
+def plan_payload(state:dict):
+    """Everything the UI renders around a plan's text. It travels with the reply message too, because
+    the state only ever holds the latest plan's cards: a second plan in the same chat overwrites them."""
+    return {
+        # The day-by-day plan and the hotel shortlist, which the UI renders as cards instead of prose
+        "days": state.get("itinerary_days", []),
+        "hotels": state.get("hotel_picks", []),
+        # The terms the plan was made against, shown as a strip above it
+        "brief": trip_brief(state),
+        "costs": state.get("budget_costs") or None,
+        # The plan's title card, under the brief
+        "header": trip_header(state),
+    }
+
+
 def format_result(thread_id:str, result:dict):
     interrupts = result.get("__interrupt__")
 
@@ -1676,14 +1750,7 @@ def format_result(thread_id:str, result:dict):
         "pause_type": None,
         "pause_payload": None,
         "final_response": result.get("final_response", ""),
-        # The day-by-day plan and the hotel shortlist, which the UI renders as cards instead of prose
-        "days": result.get("itinerary_days", []),
-        "hotels": result.get("hotel_picks", []),
-        # The terms the plan was made against, shown as a strip above it
-        "brief": trip_brief(result),
-        "costs": result.get("budget_costs") or None,
-        # The plan's title card, under the brief
-        "header": trip_header(result),
+        **plan_payload(result),
         "llm_calls": result.get("llm_calls", 0),
     }
 

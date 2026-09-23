@@ -1,3 +1,4 @@
+import type { Account } from "@/lib/api";
 import type { Thread } from "@/lib/threads";
 import { ChatIcon, CloseIcon, PlusIcon, SidebarIcon, TrashIcon } from "./icons";
 
@@ -7,6 +8,10 @@ type SidebarProps = {
   pendingIds: Set<string>;
   mobileOpen: boolean;
   collapsed: boolean;
+  // Null when nobody is logged in, so the chats are this browser's alone
+  account: Account | null;
+  onLogin: () => void;
+  onLogout: () => void;
   onSelect: (threadId: string) => void;
   onNewChat: () => void;
   onDelete: (threadId: string) => void;
@@ -20,6 +25,9 @@ export default function Sidebar({
   pendingIds,
   mobileOpen,
   collapsed,
+  account,
+  onLogin,
+  onLogout,
   onSelect,
   onNewChat,
   onDelete,
@@ -106,9 +114,29 @@ export default function Sidebar({
           )}
         </nav>
 
-        <p className="border-t border-sidebar-hover px-5 py-4 text-[11px] leading-relaxed text-faint">
-          Multi-agent planner built with LangGraph, Gemini, Tavily and AviationStack
-        </p>
+        <div className="border-t border-sidebar-hover px-5 py-4">
+          {account ? (
+            <div className="flex items-center justify-between gap-2">
+              <span className="min-w-0 truncate text-xs text-sidebar-ink" title={account.email}>
+                {account.email}
+              </span>
+              <button type="button" onClick={onLogout} className="shrink-0 text-xs text-faint underline underline-offset-2 hover:text-sidebar-ink">
+                Log out
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              <p className="text-[11px] leading-relaxed text-faint">Trips are saved to this browser only.</p>
+              <button type="button" onClick={onLogin} className="text-xs font-medium text-sidebar-ink underline underline-offset-2">
+                Log in to keep them
+              </button>
+            </div>
+          )}
+
+          <p className="mt-3 text-[11px] leading-relaxed text-faint">
+            Multi-agent planner built with LangGraph, Gemini, Tavily and AviationStack
+          </p>
+        </div>
       </aside>
     </>
   );

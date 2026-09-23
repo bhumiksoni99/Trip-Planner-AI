@@ -1,4 +1,5 @@
 import Image from "next/image";
+import type { Account } from "@/lib/api";
 import { ArrowRightIcon, GlobeIcon } from "./icons";
 
 // The backend plans from Delhi unless the traveller says otherwise
@@ -35,10 +36,42 @@ const ROUTES = [
 
 const OPEN_PROMPT = "Suggest three destinations for a week away from Delhi, then plan the one that fits my budget best.";
 
-export default function EmptyState({ onPick }: { onPick: (prompt: string) => void }) {
+type EmptyStateProps = {
+  onPick: (prompt: string) => void;
+  // Null when nobody is logged in, so trips are only kept in this browser
+  account: Account | null;
+  onLogin: () => void;
+  onLogout: () => void;
+};
+
+export default function EmptyState({ onPick, account, onLogin, onLogout }: EmptyStateProps) {
   return (
     <div className="mx-auto w-full max-w-5xl px-4 py-14 sm:px-10">
-      <p className="eyebrow">New trip</p>
+      {/* The sidebar's account block is out of sight on mobile and when it is collapsed, so the
+          home page carries its own way in */}
+      <div className="flex items-center justify-between gap-4">
+        <p className="eyebrow">New trip</p>
+
+        {account ? (
+          <div className="flex min-w-0 items-baseline gap-3">
+            <span className="min-w-0 truncate text-xs text-muted" title={account.email}>
+              {account.email}
+            </span>
+            <button
+              type="button"
+              onClick={onLogout}
+              className="shrink-0 text-xs text-faint underline underline-offset-2 hover:text-ink"
+            >
+              Log out
+            </button>
+          </div>
+        ) : (
+          <button type="button" className="btn-outline shrink-0" onClick={onLogin}>
+            Log in
+          </button>
+        )}
+      </div>
+
       <h2 className="mt-4 font-display text-[clamp(2.75rem,5.2vw,4.5rem)] leading-none tracking-[-0.015em] text-balance text-ink">
         Plan the trip.
         <br />
@@ -49,13 +82,25 @@ export default function EmptyState({ onPick }: { onPick: (prompt: string) => voi
         stay, and return one day-by-day itinerary you can book in a sitting.
       </p>
 
-      <button
-        type="button"
-        className="btn-solid mt-7"
-        onClick={() => document.getElementById("composer")?.focus()}
-      >
-        Describe a trip
-      </button>
+      <div className="mt-7 flex flex-wrap items-center gap-x-4 gap-y-2">
+        <button
+          type="button"
+          className="btn-solid"
+          onClick={() => document.getElementById("composer")?.focus()}
+        >
+          Describe a trip
+        </button>
+
+        {!account && (
+          <p className="text-[13px] text-faint">
+            Trips stay in this browser until you{" "}
+            <button type="button" onClick={onLogin} className="font-medium text-muted underline underline-offset-2 hover:text-ink">
+              log in
+            </button>
+            .
+          </p>
+        )}
+      </div>
 
       <section className="mt-14 flex items-baseline justify-between gap-4 border-b border-ink pb-3.5">
         <h3 className="font-display text-[28px] tracking-[-0.01em] text-ink">Or start from a route</h3>

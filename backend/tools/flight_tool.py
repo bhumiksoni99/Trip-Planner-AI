@@ -23,7 +23,8 @@ class Route(BaseModel):
 
 
 # Reads GEMINI_API_KEY from the environment
-llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite")
+# A short answer, so a short timeout: a hung request shouldn't hold up the flight search
+llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", timeout=20)
 route_extractor = llm.with_structured_output(Route)
 
 

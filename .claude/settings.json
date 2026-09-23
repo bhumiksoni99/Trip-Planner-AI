@@ -83,7 +83,14 @@
       "Bash(curl -s -m 280 -w '\\\\n--- HTTP %{http_code} in %{time_total}s ---\\\\n' -X POST https://trip-planner-ai-68zg.onrender.com/api/travel -H 'Content-Type: application/json' -d '{\"message\":\"Plan a 3 day Zurich trip from Delhi in mid-March under 1 lakh, relaxed pace, love street food\",\"thread_id\":\"smoke-render-1\"}')",
       "Bash(curl -s -m 280 -X POST https://trip-planner-ai-68zg.onrender.com/api/travel -H 'Content-Type: application/json' -d '{\"message\":\"Plan a 3 day Zurich trip from Delhi in mid-March under 1 lakh, relaxed pace, love street food\",\"thread_id\":\"smoke-render-2\"}')",
       "Bash(/usr/bin/python3 -c ' *)",
-      "Bash(awk '/^def /{fn=$2} /\\\\.invoke\\\\\\(/{print FILENAME\": \"fn}' agent.py tools/flight_tool.py)"
+      "Bash(awk '/^def /{fn=$2} /\\\\.invoke\\\\\\(/{print FILENAME\": \"fn}' agent.py tools/flight_tool.py)",
+      "Bash(.venv/bin/python -c \"import fastapi, uvicorn, langgraph, psycopg_pool; print\\('deps ok'\\)\")",
+      "Bash(lsof -i:8000 -sTCP:LISTEN -n -P)",
+      "Bash(curl -sf -m 5 http://127.0.0.1:8000/health)",
+      "Bash(kill 58054)",
+      "Bash(lsof -ti:8000 -sTCP:LISTEN)",
+      "Bash(perl -e 'select undef,undef,undef,0.5')",
+      "Bash(ps -p 58054 -o pid=)"
     ]
   }
 }

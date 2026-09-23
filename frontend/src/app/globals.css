@@ -158,6 +158,25 @@ body {
     opacity: 0.85;
   }
 
+  /* Outlined counterpart to .btn-solid, for a secondary action set beside it */
+  .btn-outline {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    border-radius: var(--radius);
+    border: 1px solid var(--ink);
+    padding: 0.45rem 0.9rem;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: var(--ink);
+    transition: background-color 150ms, color 150ms;
+  }
+
+  .btn-outline:hover {
+    background: var(--ink);
+    color: var(--canvas);
+  }
+
   /* Destination cards on the home page: edge to edge, separated by 1px gaps.
      Flex column, because a button otherwise centres its content once the grid stretches it */
   .route-card {
@@ -186,6 +205,7 @@ body {
   .icon-btn:focus-visible,
   .send-btn:focus-visible,
   .action-btn:focus-visible,
+  .btn-outline:focus-visible,
   .btn-solid:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 2px;

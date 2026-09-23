@@ -1,3 +1,6 @@
+// Type-only, so it doesn't create a real import cycle with threads.ts
+import type { Message } from "./threads";
+
 export type ApprovalPause = {
   type: "approval";
   question: string;
@@ -224,4 +227,60 @@ export async function resumePlan(
   });
 
   return readPlanStream(response, onProgress);
+}
+
+// ---------------------------------------------------------------- accounts and saved chats
+
+export type Account = { id: string; email: string };
+export type ChatSummary = { id: string; title: string; updatedAt: number };
+export type ChatDetail = ChatSummary & {
+  messages: Message[];
+  // The question the chat is paused on, so a refresh mid-intake brings the card back
+  pause: IntakePause | ApprovalPause | null;
+};
+
+async function send<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(path, {
+    ...init,
+    headers: init?.body ? { "Content-Type": "application/json", ...init?.headers } : init?.headers,
+  });
+
+  if (!response.ok) throw new Error(await failureOf(response));
+
+  // The backend wraps everything as { success, data }
+  const body = await response.json();
+  return body.data as T;
+}
+
+export function signup(email: string, password: string): Promise<Account> {
+  return send<Account>("/api/auth/signup", { method: "POST", body: JSON.stringify({ email, password }) });
+}
+
+export function login(email: string, password: string): Promise<Account> {
+  return send<Account>("/api/auth/login", { method: "POST", body: JSON.stringify({ email, password }) });
+}
+
+export function logout(): Promise<void> {
+  return send<void>("/api/auth/logout", { method: "POST" });
+}
+
+export function listChats(): Promise<ChatSummary[]> {
+  return send<ChatSummary[]>("/api/chats");
+}
+
+/** One chat, rebuilt from its checkpoint, or null when it isn't there (or isn't yours). */
+export async function loadChat(id: string): Promise<ChatDetail | null> {
+  const response = await fetch(`/api/chats/${id}`);
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(await failureOf(response));
+  return (await response.json()).data as ChatDetail;
+}
+
+export function deleteChat(id: string): Promise<{ id: string }> {
+  return send<{ id: string }>(`/api/chats/${id}`, { method: "DELETE" });
+}
+
+/** Hands the chats planned as a guest to the account just logged into. */
+export function claimChats(threadIds: string[]): Promise<{ claimed: string[] }> {
+  return send<{ claimed: string[] }>("/api/chats/claim", { method: "POST", body: JSON.stringify({ thread_ids: threadIds }) });
 }

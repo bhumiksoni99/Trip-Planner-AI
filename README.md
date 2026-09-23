@@ -112,6 +112,21 @@ the supervisor skipped flights.
 
 ## Design decisions worth knowing
 
+**Chats are stored once, by LangGraph.** Every run is checkpointed in Postgres under a `thread_id`, and
+that checkpoint already holds the conversation. So accounts don't copy any of it: a `chats` row records
+who owns a `thread_id`, its title and when it was last used, and a user has many of those rows. Opening
+a chat rebuilds it from the checkpoint.
+
+Two details make that work. The replies a traveller should see are tagged `name="reply"` and carry their
+own cards, because the state itself only ever holds the newest plan's cards, so a second plan in the same
+chat would otherwise take the first one's. And the agents' own notes to each other ("Weather Fetched")
+are filtered out.
+
+**Guests don't need an account.** A guest's chats sit in the database with no owner; their browser only
+remembers the ids. Logging in claims those ids, which skips over any that already belong to someone else,
+so a stray id can't take another person's chat. Someone else's chat answers 404, never 403, so the reply
+doesn't reveal that it exists.
+
 **No approval gate by default.** The graph has a human-in-the-loop node that pauses for approval
 before the write-up. It's off, because intake now collects the trip's terms up front and a chat
 follow-up already refines the plan through the same `feedback_agent` — the gate had become an extra
@@ -191,7 +206,9 @@ All of it comes from a `.env` at the repo root.
 | `TAVILY_API_KEY` | yes | Web search: hotels, places and link previews |
 | `AVIATIONSTACK_API_KEY` | yes | Live flight schedules |
 | `OPENWEATHER_API_KEY` | yes | Current weather and the forecast, for the agent and the weather MCP server |
-| `POSTGRES_DB` | yes | Connection string for the LangGraph checkpointer |
+| `POSTGRES_DB` | yes | Connection string for the checkpoints, and for the accounts and chats tables |
+| `JWT_SECRET` | yes | Signs login tokens; at least 32 characters |
+| `DB_POOL_SIZE` | no | Database connections to keep, default `4` |
 | `DEFAULT_ORIGIN` | no | Fallback departure airport, default `DEL` |
 | `DEFAULT_ORIGIN_CITY` | no | Fallback departure city, shown in intake options |
 | `REQUIRE_APPROVAL` | no | `true` re-enables the approval pause, default `false` |
@@ -212,6 +229,13 @@ All of it comes from a `.env` at the repo root.
 | `POST /api/travel/resume` | Answer whatever the run paused on |
 | `POST /api/travel/resume/stream` | The same, streamed |
 | `GET /api/place?q=` | Photos and links for a place, for the in-app preview sheet |
+| `POST /api/auth/signup` | Create an account; returns a login token |
+| `POST /api/auth/login` | Log in; returns a login token |
+| `GET /api/auth/me` | The account a token belongs to |
+| `GET /api/chats` | The logged-in traveller's chats, newest first |
+| `GET /api/chats/{thread_id}` | One chat, rebuilt from its checkpoint, with any question it's paused on |
+| `DELETE /api/chats/{thread_id}` | Delete a chat and its checkpoints |
+| `POST /api/chats/claim` | Hand the chats planned as a guest to the account just logged into |
 | `GET /health` | Liveness check |
 
 Every request carries a `thread_id`; that's the LangGraph thread, so the whole conversation's state
@@ -236,6 +260,9 @@ backend/
   app.py                FastAPI endpoints, including the SSE streams
   mcp_client.py         MCP clients for Tavily and the weather server (not on the request path)
   custom_weather_mcp.py a FastMCP server exposing the weather tool
+  auth.py               password hashing and the login token
+  chats.py              who owns which chat
+  db.py                 the Postgres pool, and the users and chats tables
   place_preview.py      cached Tavily REST search for previews and hotels
   tools/flight_tool.py  AviationStack flight lookup
   tools/weather_tool.py OpenWeather current conditions and forecast

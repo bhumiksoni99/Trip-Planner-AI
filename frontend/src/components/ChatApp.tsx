@@ -1,10 +1,13 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { flushSync } from "react-dom";
 import {
+  logout,
   requestPlan,
   resumePlan,
+  type Account,
   type AgentProgressEvent,
   type ApprovalPause,
   type BriefTerm,
@@ -17,7 +20,17 @@ import {
   type ResumeAnswer,
 } from "@/lib/api";
 import { setActiveThreadId, useActiveThreadId } from "@/lib/activeThread";
-import { addMessage, createThread, deleteThread, removeLastMessage, useThreads } from "@/lib/threads";
+import {
+  addMessage,
+  claimGuestChats,
+  createThread,
+  deleteThread,
+  loadThread,
+  removeLastMessage,
+  setAccount,
+  useThreads,
+} from "@/lib/threads";
+import AccountDialog from "./AccountDialog";
 import { applyProgress, emptyProgress, type ProgressState } from "./AgentProgress";
 import Composer, { type ComposerHandle } from "./Composer";
 import EmptyState from "./EmptyState";
@@ -27,7 +40,11 @@ import LinkPanel, { type OpenLink } from "./LinkPanel";
 import MessageList from "./MessageList";
 import Sidebar from "./Sidebar";
 
-export default function ChatApp() {
+export default function ChatApp({ account: signedInOnLoad }: { account: Account | null }) {
+  const router = useRouter();
+  // Seeded by the server, which is the only side that can read the login cookie, and kept here so
+  // logging in or out updates the app straight away rather than waiting for the page to re-render
+  const [account, setSession] = useState(signedInOnLoad);
   const threads = useThreads();
   // Which trip is open is held in the URL, not in state, so ?thread= and the UI can't drift apart
   const activeId = useActiveThreadId();
@@ -50,6 +67,24 @@ export default function ChatApp() {
   const [progress, setProgress] = useState<Record<string, ProgressState>>({});
   // The composer keeps its own draft, so typing doesn't re-render the conversation
   const composerRef = useRef<ComposerHandle>(null);
+  const [accountOpen, setAccountOpen] = useState(false);
+
+  // The store lists the account's chats when logged in, and this browser's when not
+  useEffect(() => {
+    setAccount(account?.id ?? null);
+  }, [account?.id]);
+
+  // A chat's messages live in the database, so opening one fetches it, along with any question it
+  // is paused on. That is what brings the intake card back after a refresh
+  useEffect(() => {
+    const thread = activeId ? threads.find((item) => item.id === activeId) : null;
+    if (!activeId || !thread || thread.loaded || thread.local || pendingIds.has(activeId)) return;
+
+    void loadThread(activeId).then((detail) => {
+      if (detail) setPause(activeId, detail.pause);
+      else setActiveThreadId(null); // gone, or someone else's
+    });
+  }, [activeId, threads, pendingIds]);
 
   const sortedThreads = useMemo(() => [...threads].sort((a, b) => b.updatedAt - a.updatedAt), [threads]);
   const activeThread = threads.find((thread) => thread.id === activeId) ?? null;
@@ -186,8 +221,26 @@ export default function ChatApp() {
 
   function removeThread(threadId: string) {
     if (!window.confirm("Delete this trip? This can't be undone.")) return;
-    deleteThread(threadId);
     if (threadId === activeId) setActiveThreadId(null);
+
+    void deleteThread(threadId).catch(() => {
+      window.alert("Couldn't delete that trip. Please try again.");
+    });
+  }
+
+  async function signedIn(user: Account) {
+    setAccountOpen(false);
+    // The chats planned before logging in belong to this account now; their conversations are already
+    // in the database, so only who owns them changes
+    await claimGuestChats();
+    setSession(user);
+    router.refresh(); // keeps the server's idea of who is logged in in step
+  }
+
+  async function signOut() {
+    await logout().catch(() => undefined);
+    setSession(null);
+    router.refresh();
   }
 
   function downloadPdf(content: string, days?: PlanDay[], hotels?: PlanHotel[], brief?: BriefTerm[], header?: PlanHeader | null, costs?: PlanCosts | null) {
@@ -208,6 +261,9 @@ export default function ChatApp() {
           pendingIds={pendingIds}
           mobileOpen={mobileSidebarOpen}
           collapsed={sidebarCollapsed}
+          account={account}
+          onLogin={() => setAccountOpen(true)}
+          onLogout={signOut}
           onSelect={selectThread}
           onNewChat={startNewChat}
           onDelete={removeThread}
@@ -268,7 +324,7 @@ export default function ChatApp() {
                 onLinkClick={(href, label) => setOpenLink({ href, label })}
               />
             ) : (
-              <EmptyState onPick={send} />
+              <EmptyState onPick={send} account={account} onLogin={() => setAccountOpen(true)} onLogout={signOut} />
             )}
           </main>
 
@@ -276,6 +332,7 @@ export default function ChatApp() {
         </div>
 
         {openLink && <LinkPanel key={openLink.href} link={openLink} onClose={() => setOpenLink(null)} />}
+        {accountOpen && <AccountDialog onClose={() => setAccountOpen(false)} onSignedIn={signedIn} />}
       </div>
 
       {printContent && (
