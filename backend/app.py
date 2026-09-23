@@ -128,17 +128,26 @@ async def health_check():
     })
 
 @app.post('/api/travel')
-async def get_itinerary(request: TravelRequest):
+def get_itinerary(request: TravelRequest, user: dict | None = Depends(optional_user)):
+    """Plan a trip and wait for the whole plan. The UI uses the streaming route; this one is for curl.
+
+    Plain def, so the planning run happens in a worker thread rather than on the event loop."""
+    user_message = request.message.strip()
+
+    if not user_message:
+        return JSONResponse(status_code=400,content={
+            "success": False,
+            "error": "Message cannot be empty"
+        })
+
+    thread_id = request.thread_id or uuid4().hex
+    check_readable(thread_id, user)  # outside the catch below, so a 404 stays a 404
+
+    if user:
+        chats.remember(thread_id, user["id"], title_of(user_message))
+
     try:
-        user_message = request.message.strip()
-
-        if not user_message:
-            return JSONResponse(status_code=400,content={
-                "success": False,
-                "error": "Messsage cannot be empty"
-            })
-
-        answer = run_travel_agent(user_message,request.thread_id)
+        answer = run_travel_agent(user_message, thread_id)
 
         return JSONResponse(status_code=200,content = {
             "success":True,
@@ -161,8 +170,13 @@ def resume_value_of(request: ResumeRequest):
 
 
 @app.post('/api/travel/resume')
-async def resume_itinerary(request: ResumeRequest):
+def resume_itinerary(request: ResumeRequest, user: dict | None = Depends(optional_user)):
     """Answer the question a paused run is waiting on, and carry on planning."""
+    check_readable(request.thread_id, user)
+
+    if user:
+        chats.touch(request.thread_id, user["id"])
+
     try:
         answer = resume_travel_agent(request.thread_id, resume_value_of(request))
 
