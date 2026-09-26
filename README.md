@@ -50,6 +50,10 @@ drift apart.
 JSON, not prose, and the UI lays them out as cards. The write-up drops `[[HOTELS]]`, `[[ITINERARY]]`
 and `[[COSTS]]` markers where each belongs, and the frontend splices the components in.
 
+**Answers the question you asked.** Ask about hotels and you get hotels — not a trip plan with an
+empty Flights section and a day-by-day you never wanted. Ask for cheaper hotels on a plan you already
+have and the itinerary isn't rewritten; it comes back when you ask for it.
+
 **Refines instead of replanning.** A follow-up message is classified as a refinement or a new trip.
 A refinement goes to `feedback_agent`, which decides which specialists have to run again — "make it
 cheaper" re-runs hotels and the budget, "reword day 2" just rewrites the plan. Every round of
@@ -153,6 +157,15 @@ the search results is dropped rather than shown.
 **Percentages are computed, not generated.** The budget agent returns two plain numbers; the
 "71% of budget" figure is divided in Python. Asking a model for a percentage gets you arithmetic
 that looks authoritative and is sometimes wrong.
+
+**The write-up's sections are chosen in code, not by the model.** Which specialists ran is already
+known exactly, so `plan_outline` builds the list of sections from it and the prompt is told to write
+those and nothing else. The alternative — a sentence asking the model to "leave out what wasn't asked
+for" — is a guess it gets wrong: the prompt used to list all six sections unconditionally, so a
+question about the weather in Kyoto came back with a Flights section saying flights weren't available
+and an `[[ITINERARY]]` marker for an itinerary that was never written. Only the data behind the
+sections being written is put in the prompt, too, since a refinement's state still holds the previous
+run's itinerary and handing that over is what invites the whole plan back.
 
 **One model call per decision, not one per question.** A plan used to make ten model calls; it now
 makes six. The guardrail and the agent selection were one decision read twice, so they became a single

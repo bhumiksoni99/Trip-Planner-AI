@@ -9,6 +9,7 @@ import os
 # Before agent is imported, so these fake runs never reach the LangSmith project
 os.environ["LANGSMITH_TRACING"] = "false"
 
+import re
 import sys
 import threading
 import time
@@ -222,6 +223,33 @@ agent.llm = PlainText()  # the plain-text fallback, faked so it makes no API cal
 events, _ = run("t8", "5 days in Japan", list(agent.AGENT_ORDER))
 check("the plan still finishes", events[-1]["event"] == "done" and bool(events[-1]["data"].get("final_response")))
 check("on the plain-text fallback", calls["plain_text"] == 1)
+
+print("\n9. The write-up covers what was asked, and nothing else")
+
+
+def headings(*selected):
+    """The section headings plan_outline asks the write-up for, given the agents that ran"""
+    names = []
+    for section in agent.plan_outline({"selected_agents": list(selected)}):
+        heading = re.search(r'"(## [^"]+)"', section)
+        names.append(heading.group(1) if heading else "[[ITINERARY]]")
+    return names
+
+
+FULL = ["## Trip Overview", "## Flights", "## Hotels", "[[ITINERARY]]", "## Weather",
+        "## Estimated Budget", "## Travel Tips"]
+
+check("a whole trip is written in full, as before", headings(*agent.AGENT_ORDER) == FULL, str(headings(*agent.AGENT_ORDER)))
+check("a hotels question gets hotels only", headings("hotel_agent") == ["## Hotels"], str(headings("hotel_agent")))
+check("a weather question gets weather only", headings("weather_agent") == ["## Weather"], str(headings("weather_agent")))
+check("and no day-by-day plan it never wrote", "[[ITINERARY]]" not in headings("hotel_agent", "budget_agent"))
+check("a hotel change gets hotels and the new cost",
+      headings("hotel_agent", "budget_agent") == ["## Hotels", "## Estimated Budget"],
+      str(headings("hotel_agent", "budget_agent")))
+check("a day change keeps the plan's shape", headings("itinerary_agent") == ["## Trip Overview", "[[ITINERARY]]", "## Travel Tips"],
+      str(headings("itinerary_agent")))
+# A re-wording re-runs no specialist at all, and that one does want the whole plan again
+check("a re-wording with no agents still writes the whole plan", headings() == FULL)
 
 print(f"\n{'ALL PASSED' if not failures else f'{len(failures)} FAILED: {failures}'}")
 sys.exit(1 if failures else 0)
