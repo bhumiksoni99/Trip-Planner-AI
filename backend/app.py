@@ -7,6 +7,7 @@ import json
 import queue
 import re
 import threading
+import time
 import psycopg
 import uvicorn
 import traceback
@@ -14,6 +15,7 @@ from typing import Annotated
 from uuid import uuid4
 import chats
 import db
+import runs
 from agent import (
     chat_messages,
     forget_thread,
@@ -146,8 +148,13 @@ def get_itinerary(request: TravelRequest, user: dict | None = Depends(optional_u
     if user:
         chats.remember(thread_id, user["id"], title_of(user_message))
 
+    started = time.perf_counter()
     try:
         answer = run_travel_agent(user_message, thread_id)
+        # No progress events on this route, so the agent list is unknown and the outcome is read
+        # from the payload alone
+        runs.from_result(thread_id, user["id"] if user else None, "message", answer, [],
+                         int((time.perf_counter() - started) * 1000))
 
         return JSONResponse(status_code=200,content = {
             "success":True,
@@ -177,8 +184,12 @@ def resume_itinerary(request: ResumeRequest, user: dict | None = Depends(optiona
     if user:
         chats.touch(request.thread_id, user["id"])
 
+    started = time.perf_counter()
     try:
         answer = resume_travel_agent(request.thread_id, resume_value_of(request))
+        runs.from_result(request.thread_id, user["id"] if user else None,
+                         "skip" if request.skipped else "answer", answer, [],
+                         int((time.perf_counter() - started) * 1000))
 
         return JSONResponse(status_code=200,content = {
             "success":True,
@@ -200,6 +211,32 @@ SSE_HEADERS = {
     "Cache-Control": "no-cache, no-transform",
     "X-Accel-Buffering": "no",  # stops nginx-style proxies buffering the events
 }
+
+
+def tracked(events, thread_id: str, user: dict | None, source: str):
+    """Passes the progress events straight through, noting what the run did on their way past.
+
+    Wrapping the generator rather than the route is what makes this honest: the work happens inside
+    the stream, so this is the only place that sees a run end, including one that ends by failing."""
+    started = time.perf_counter()
+    agents: list[str] = []
+    result = None
+
+    try:
+        for event in events:
+            if event["event"] == "agent_started":
+                agents.append(event["data"]["agent"])
+            elif event["event"] == "done":
+                result = event["data"]
+            yield event
+    finally:
+        elapsed = int((time.perf_counter() - started) * 1000)
+        if result is None:
+            # The stream stopped before the plan was finished, which a failure does
+            runs.record(thread_id, user["id"] if user else None, source, "failed",
+                        agents, 0, elapsed, None)
+        else:
+            runs.from_result(thread_id, user["id"] if user else None, source, result, agents, elapsed)
 
 
 def sse(events):
@@ -260,7 +297,7 @@ def stream_itinerary(request: TravelRequest, user: dict | None = Depends(optiona
         chats.remember(thread_id, user["id"], title_of(user_message))
 
     return StreamingResponse(
-        sse(stream_travel_agent(user_message, thread_id)),
+        sse(tracked(stream_travel_agent(user_message, thread_id), thread_id, user, "message")),
         media_type="text/event-stream",
         headers=SSE_HEADERS,
     )
@@ -274,8 +311,10 @@ def stream_resume_itinerary(request: ResumeRequest, user: dict | None = Depends(
     if user:
         chats.touch(request.thread_id, user["id"])
 
+    # Skipping the questions and answering them are different decisions, so they count separately
     return StreamingResponse(
-        sse(stream_resume_travel_agent(request.thread_id, resume_value_of(request))),
+        sse(tracked(stream_resume_travel_agent(request.thread_id, resume_value_of(request)),
+                    request.thread_id, user, "skip" if request.skipped else "answer")),
         media_type="text/event-stream",
         headers=SSE_HEADERS,
     )

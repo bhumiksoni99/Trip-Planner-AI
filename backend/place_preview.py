@@ -30,14 +30,33 @@ _cache: OrderedDict[str, dict] = OrderedDict()
 _cache_lock = threading.Lock()
 
 
-def search_place(query: str, max_results: int = 5, include_images: bool = True) -> dict:
+def as_image(entry):
+    """One image in our own shape, or None for anything unusable.
+
+    Tavily answers with an object per image when captions are asked for, and with a plain URL string
+    when they aren't, so both forms arrive here."""
+    if isinstance(entry, str):
+        return {"url": entry, "description": ""} if entry.strip() else None
+
+    if isinstance(entry, dict) and entry.get("url"):
+        return {"url": entry["url"], "description": entry.get("description", "")}
+
+    return None
+
+
+def search_place(query: str, max_results: int = 5, include_images: bool = True,
+                 describe_images: bool = True) -> dict:
     """Returns {"images": [...], "results": [...]} for a place, cached per query.
 
     Pass include_images=False when only the links are needed, as the hotel searches do. Tavily finds
     and describes the images on its side, which makes the search noticeably slower, and the preview
-    panel fetches its own when a hotel is opened."""
-    # The flag is part of the key, so an image-less result is never served to the preview panel
-    key = f"{query.strip().lower()}|images={include_images}"
+    panel fetches its own when a hotel is opened.
+
+    describe_images=False keeps the image links but drops the captions, which measured about a second
+    quicker. The header photo only needs a URL; the preview panel uses the captions as alt text."""
+    # The flags are part of the key, so an image-less or caption-less result is never served to the
+    # preview panel, which shows both
+    key = f"{query.strip().lower()}|images={include_images}|described={describe_images}"
 
     with _cache_lock:
         cached = _cache.get(key)
@@ -59,7 +78,7 @@ def search_place(query: str, max_results: int = 5, include_images: bool = True) 
                 "query": query,
                 "max_results": max_results,
                 "include_images": include_images,
-                "include_image_descriptions": include_images,
+                "include_image_descriptions": include_images and describe_images,
             },
             timeout=20,
         )
@@ -75,11 +94,7 @@ def search_place(query: str, max_results: int = 5, include_images: bool = True) 
         return {"images": [], "results": [], "error": "The search service couldn't look this one up."}
 
     preview = {
-        "images": [
-            {"url": image["url"], "description": image.get("description", "")}
-            for image in data.get("images", [])
-            if isinstance(image, dict) and image.get("url")
-        ],
+        "images": [image for image in map(as_image, data.get("images", [])) if image],
         "results": [
             {
                 "title": result.get("title", ""),

@@ -58,10 +58,33 @@ TABLES = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS chats_by_user ON chats (user_id, updated_at DESC)",
+    # One row per run of the graph, which is what makes the product questions answerable: how many
+    # people who start a trip get one, where they drop out, what a plan costs to serve.
+    # No message text: the conversation is already in the checkpoints, and this only needs counting.
+    """
+    CREATE TABLE IF NOT EXISTS runs (
+        id          bigserial   PRIMARY KEY,
+        thread_id   text        NOT NULL,
+        -- Null for guests, and set null rather than cascade when an account goes: the aggregate
+        -- stays true even though the run no longer belongs to anybody
+        user_id     uuid        REFERENCES users(id) ON DELETE SET NULL,
+        source      text        NOT NULL,   -- message | answer | skip
+        outcome     text        NOT NULL,   -- delivered | asked | refused | failed
+        agents      text[]      NOT NULL DEFAULT '{}',
+        llm_calls   int         NOT NULL DEFAULT 0,
+        duration_ms int         NOT NULL DEFAULT 0,
+        destination text,
+        created_at  timestamptz NOT NULL DEFAULT now()
+    )
+    """,
+    # A thread's runs in order: the first is the new trip, the rest are refinements
+    "CREATE INDEX IF NOT EXISTS runs_by_thread ON runs (thread_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS runs_by_day ON runs (created_at DESC)",
     # Supabase serves every table in the public schema through its REST API. Row level security with no
     # policies closes that off; the backend connects as the tables' owner, which RLS doesn't apply to
     "ALTER TABLE users ENABLE ROW LEVEL SECURITY",
     "ALTER TABLE chats ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE runs ENABLE ROW LEVEL SECURITY",
 ]
 
 

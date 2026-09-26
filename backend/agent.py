@@ -7,7 +7,7 @@ import uuid
 import requests
 import operator
 from concurrent.futures import ThreadPoolExecutor
-from functools import partial
+from functools import lru_cache, partial
 from pydantic import BaseModel, Field, ValidationError
 
 from langgraph.graph import StateGraph, START, END
@@ -615,20 +615,52 @@ def next_in_sequence(state:TravelState, current:str | None = None):
     return "hil_agent" if REQUIRE_APPROVAL else "final_response_agent"
 
 
+def photo_rides_with_hotels(state:TravelState):
+    """Whether the header photo can be fetched beside the hotel search instead of before the itinerary.
+
+    It only feeds the header card, so nothing in the plan waits on it. The hotel search is the slowest
+    step and runs after the itinerary, so a photo fetched alongside it costs nothing, where the same
+    fetch in the opening group used to hold the itinerary up by about four seconds."""
+    selected = state.get("selected_agents") or AGENT_ORDER
+    return "itinerary_agent" in selected and "hotel_agent" in selected
+
+
 def start_planning(state:TravelState, with_photo:bool):
-    """The first step of a plan: flights, weather and the destination photo all at once, as each needs
-    only the trip details. Returning several names runs them side by side, and each routes on to the
-    same next agent, which LangGraph then runs once, after all of them have finished.
+    """The first step of a plan: flights and weather at once, as each needs only the trip details.
+    Returning several names runs them side by side, and each routes on to the same next agent, which
+    LangGraph then runs once, after all of them have finished.
 
     Only a new trip fetches the photo; a revision keeps the one it already has."""
     selected = state.get("selected_agents") or AGENT_ORDER
     first = [name for name in PARALLEL_AGENTS if name in selected]
 
-    # Even with no destination, so a new trip clears the previous trip's photo
-    if with_photo:
+    # Even with no destination, so a new trip clears the previous trip's photo. With no hotel search
+    # to hide behind, it runs here
+    if with_photo and not photo_rides_with_hotels(state):
         first.append("photo_agent")
 
     return first or next_in_sequence(state)
+
+
+def after_itinerary(state:TravelState):
+    """Sends the hotel search off, with the header photo beside it when one is wanted. Both route on
+    to the same next agent, so LangGraph runs it once, after the two of them have finished."""
+    following = next_in_sequence(state, "itinerary_agent")
+
+    # A revision keeps the photo it already has, and only a new trip has none
+    if following == "hotel_agent" and not state.get("is_refinement"):
+        return ["hotel_agent", "photo_agent"]
+
+    return following
+
+
+def after_photo(state:TravelState):
+    """Where the photo rejoins the plan: beside the hotel search when it rode with it, otherwise it
+    ran with flights and weather, so it goes wherever they go."""
+    if photo_rides_with_hotels(state):
+        return next_in_sequence(state, "hotel_agent")
+
+    return next_in_sequence(state)
 
 
 # Sends the workflow on to the chosen specialists, or stops it when the guardrail said no
@@ -778,28 +810,61 @@ def trip_brief(state:dict):
     ]
 
 
+def usable_photo(url:str):
+    """Whether a candidate is still a live image. A dead or non-image link leaves a hole in the card"""
+    try:
+        response = requests.head(url, timeout=5, allow_redirects=True)
+    except requests.exceptions.RequestException:
+        return False
+
+    return response.status_code == 200 and response.headers.get("content-type", "").startswith("image/")
+
+
+class NoPhoto(Exception):
+    """Raised when a destination turns up no usable photo, so the failure isn't what gets cached"""
+
+
+@lru_cache(maxsize=200)
+def photo_of(destination:str):
+    """The cached half of destination_photo. Raises NoPhoto rather than returning nothing, because
+    lru_cache stores what a call returns but not what it raises: a search that failed on a dropped
+    connection is then tried again next time, while a photo that was found is kept."""
+    images = search_place(f"{destination} skyline landmark scenic view", max_results=6,
+                          describe_images=False).get("images") or []
+
+    # Stock libraries serve watermarked previews, which look broken on a card
+    candidates = [image.get("url", "") for image in images]
+    candidates = [url for url in candidates if url and not any(host in url for host in STOCK_PHOTO_HOSTS)]
+
+    if not candidates:
+        logger.info("destination_photo | %s: no candidates to check", destination)
+        raise NoPhoto(destination)
+
+    # map() keeps the results in Tavily's order, so this still picks the best candidate that works,
+    # not whichever host answered first
+    with ThreadPoolExecutor(max_workers=len(candidates)) as pool:
+        for url, ok in zip(candidates, pool.map(usable_photo, candidates)):
+            if ok:
+                logger.info("destination_photo | %s: %s", destination, preview(url, 70))
+                return url
+
+    logger.info("destination_photo | %s: nothing usable from %s candidates", destination, len(candidates))
+    raise NoPhoto(destination)
+
+
 def destination_photo(destination:str):
     """A photo of the destination for the plan's header card, from the same search the preview panel uses.
-    Candidates are checked first, because a dead or non-image link leaves a hole in the card."""
-    images = search_place(f"{destination} skyline landmark scenic view", max_results=6).get("images") or []
 
-    for image in images:
-        url = image.get("url", "")
-        # Stock libraries serve watermarked previews, which look broken on a card
-        if not url or any(host in url for host in STOCK_PHOTO_HOSTS):
-            continue
+    Cached, because travellers plan the same handful of places and a photo of Tokyo doesn't change.
+    No captions are requested: this needs a URL, and asking Tavily to describe each image costs about
+    a second. The candidates are checked at once rather than in turn, so one slow host can't hold up
+    a photo that a later candidate would have served.
 
-        try:
-            response = requests.head(url, timeout=5, allow_redirects=True)
-        except requests.exceptions.RequestException:
-            continue
-
-        if response.status_code == 200 and response.headers.get("content-type", "").startswith("image/"):
-            logger.info("destination_photo | %s: %s", destination, preview(url, 70))
-            return url
-
-    logger.info("destination_photo | %s: nothing usable from %s candidates", destination, len(images))
-    return ""
+    An empty string here means the card simply goes without a photo, which is why nothing raises."""
+    try:
+        return photo_of(destination)
+    except NoPhoto:
+        return ""
 
 
 def title_case(text:str):
@@ -897,8 +962,8 @@ def flight_agent(state:TravelState):
     }
 
 def photo_agent(state:TravelState):
-    """The header card's photo. It needs only the destination, so it runs alongside flights and weather
-    instead of after the write-up, where its image checks used to hold up the finished plan."""
+    """The header card's photo. Nothing in the plan reads it, so it runs alongside the hotel search,
+    which is slower, and the itinerary no longer waits on it. See photo_rides_with_hotels."""
     destination = (state.get("trip_constraints") or {}).get("destination", "")
     return {"destination_image": destination_photo(destination) if destination else ""}
 
@@ -1493,7 +1558,7 @@ graph.add_conditional_edges(
     ["intake_agent", *PARALLEL_AGENTS, *SEQUENTIAL_AGENTS, *AFTER_SPECIALISTS, END],
 )
 
-# Planning starts once the trip details are in, with flights, weather and the photo side by side
+# Planning starts once the trip details are in, with flights and weather side by side
 graph.add_conditional_edges(
     "intake_agent",
     partial(start_planning, with_photo=True),
@@ -1502,15 +1567,19 @@ graph.add_conditional_edges(
 
 # Each of those routes to the same next agent. Conditional edges, not add_edge([...], target):
 # that form waits for every listed node, so it would hang when the supervisor skipped flights
-for agent_name in [*PARALLEL_AGENTS, "photo_agent"]:
+for agent_name in PARALLEL_AGENTS:
     graph.add_conditional_edges(agent_name, next_in_sequence, [*SEQUENTIAL_AGENTS, *AFTER_SPECIALISTS])
 
-# Then the itinerary, hotels and budget in turn, skipping any the supervisor didn't pick
+# The photo rejoins beside the hotel search, or with flights and weather when it ran there
+graph.add_conditional_edges("photo_agent", after_photo, [*SEQUENTIAL_AGENTS, *AFTER_SPECIALISTS])
+
+# Then the itinerary, hotels and budget in turn, skipping any the supervisor didn't pick.
+# The itinerary is the one that sends the photo off alongside the hotel search
 for agent_name in SEQUENTIAL_AGENTS:
     graph.add_conditional_edges(
         agent_name,
-        partial(next_in_sequence, current=agent_name),
-        [*SEQUENTIAL_AGENTS, *AFTER_SPECIALISTS],
+        after_itinerary if agent_name == "itinerary_agent" else partial(next_in_sequence, current=agent_name),
+        [*SEQUENTIAL_AGENTS, "photo_agent", *AFTER_SPECIALISTS],
     )
 
 graph.add_conditional_edges("hil_agent", route_after_hil, ["feedback_agent", "final_response_agent"])

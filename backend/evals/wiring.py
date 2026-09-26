@@ -115,7 +115,13 @@ def started(events):
     return [e["data"]["agent"] for e in events if e["event"] == "agent_started"]
 
 
-FIRST_STAGE = ("flight_agent", "weather_agent", "photo_agent")
+FIRST_STAGE = ("flight_agent", "weather_agent")
+
+
+def at(events, event, agent_name):
+    """Where an agent started or finished in the stream, as an index, so two agents can be ordered"""
+    return next(i for i, e in enumerate(events) if e["event"] == event and e["data"]["agent"] == agent_name)
+
 
 print("\n1. New trip, every agent selected")
 events, took = run("t1", "5 days in Japan", list(agent.AGENT_ORDER))
@@ -123,7 +129,13 @@ done = events[-1]["data"]
 names = started(events)
 first_finish = next(i for i, e in enumerate(events) if e["event"] == "agent_finished" and e["data"]["agent"] in FIRST_STAGE)
 first_starts = [i for i, e in enumerate(events) if e["event"] == "agent_started" and e["data"]["agent"] in FIRST_STAGE]
-check("flights, weather and photo all start before any of them finishes", len(first_starts) == 3 and max(first_starts) < first_finish)
+check("flights and weather start before either of them finishes", len(first_starts) == 2 and max(first_starts) < first_finish)
+# Nothing in the plan reads the photo, so it rides with the slower hotel search rather than
+# holding the itinerary up, which is what it used to do
+check("the itinerary doesn't wait for the photo",
+      at(events, "agent_started", "itinerary_agent") < at(events, "agent_started", "photo_agent"))
+check("the photo runs beside the hotel search",
+      at(events, "agent_started", "photo_agent") < at(events, "agent_finished", "hotel_agent"))
 check("itinerary runs exactly once", names.count("itinerary_agent") == 1)
 check("then itinerary, hotels, budget, write-up in order",
       [n for n in names if n in ("itinerary_agent", "hotel_agent", "budget_agent", "final_response_agent")]
