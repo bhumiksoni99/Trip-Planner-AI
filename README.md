@@ -11,7 +11,7 @@ Built with [LangGraph](https://langchain-ai.github.io/langgraph/), Google Gemini
    ↓
    asks for the dates and vibe you didn't mention
    ↓
-   flights + weather + photo at once → itinerary → hotels → budget
+   flights + weather at once → itinerary → hotels (+ photo) → budget
    ↓
    a plan, rendered as cards
    ↓
@@ -85,12 +85,11 @@ A LangGraph `StateGraph` with a Postgres checkpointer. Every node reads and writ
         │                           │
         └─────────────┬─────────────┘
                       ▼
-   flight_agent  ─┐
-   weather_agent ─┼─► itinerary_agent → hotel_agent → budget_agent
-   photo_agent   ─┘
-                      │
-                      ▼
-            final_response_agent ──► END
+   flight_agent  ─┐                    ┌─► hotel_agent ─┐
+   weather_agent ─┴─► itinerary_agent ─┤                ├─► budget_agent
+                                       └─► photo_agent ─┘        │
+                                                                 ▼
+                                                       final_response_agent ──► END
 ```
 
 | Agent | What it does |
@@ -107,11 +106,16 @@ A LangGraph `StateGraph` with a Postgres checkpointer. Every node reads and writ
 | `final_response_agent` | Combines everything into the written plan, plus a one-line summary |
 | `hil_agent` | An optional approve/request-changes gate, off by default (see below) |
 
-Flights, weather and the photo need only the trip's details, so `start_planning` sends them out
-together and LangGraph runs the itinerary once all of them have finished. The itinerary, hotels and
-budget then run in turn, because each needs the one before: hotels are searched for the cities the
-itinerary stays in. Only the specialists the supervisor selected run at all, so a weather-only
-question doesn't search for hotels.
+Flights and weather need only the trip's details, so `start_planning` sends them out together and
+LangGraph runs the itinerary once both have finished. The itinerary, hotels and budget then run in
+turn, because each needs the one before: hotels are searched for the cities the itinerary stays in.
+Only the specialists the supervisor selected run at all, so a weather-only question doesn't search
+for hotels.
+
+The header photo is the exception, and where the scheduling earns its keep. Nothing in the plan reads
+it, so it doesn't belong in front of the itinerary — profiling showed it sitting there costing 3.3s
+of every run while flights took 1.2s and weather 0.2s. It now goes out beside the hotel search, which
+is the slowest step, and finishes well inside it: the photo costs nothing at all.
 
 The join is a conditional edge from each parallel agent to the same next node, not
 `add_edge([...], target)`: that form waits for every listed node, so it would hang on a trip where
@@ -156,7 +160,12 @@ makes six. The guardrail and the agent selection were one decision read twice, s
 now returns the cities it has you sleeping in as part of its own output, which removed a call that
 re-read the itinerary to work them out — and removed the mistakes it made, since sightseeing stops
 were being counted as stays. With the parallel fan-out above, a five-day plan that took 45–75 s
-finishes in under 30 s.
+finishes in about 20–25 s.
+
+**Every scheduling change was made against a profile, not a hunch.** The stream already reports each
+agent starting and finishing, so timing a real run needs no instrumentation — and it's what showed
+that a decorative photo was holding up the itinerary, and that the hotel shortlist, not the searches,
+is now the longest single step.
 
 **MCP is available, but not on the hot path.** The repo has a FastMCP weather server
 (`custom_weather_mcp.py`) and an MCP client for it and for Tavily (`mcp_client.py`), but the agents
@@ -196,6 +205,7 @@ cd backend
 python -m evals.run guardrail                # one set
 python -m evals.run all --reps 2 --label baseline
 python -m evals.wiring                       # the whole graph, every API faked
+python -m evals.contracts --live             # our parsing vs. what the APIs really return
 ```
 
 `--reps` runs a set several times as separate experiments, because a model doesn't answer identically
@@ -203,6 +213,11 @@ twice: the spread between reps is the noise a change has to beat before it means
 LangSmith when it's configured and in `evals/results/` either way. `evals/wiring.py` is the other half —
 it runs the real graph end to end with every external call faked, so it checks routing, fan-out and
 resume in about a second without spending an API call.
+
+`evals/contracts.py` covers the blind spot those two share: both agree with our code by construction,
+because we wrote the fakes. It checks our parsing against recorded real responses, and `--live` asks
+the API whether those recordings still hold. It exists because a change that made Tavily answer in a
+different shape passed every other check while quietly returning no photo at all.
 
 Where it stands, at the latest run of each set, over two repetitions:
 
@@ -220,6 +235,27 @@ where the two repetitions disagreed — that spread is the noise, not a result.
 These found real defects rather than confirming the code was fine: the selector was dropping flights
 and hotels from plans that needed them, the weather city came back empty on some requests, day trips
 were being counted as places you sleep, and a hotel change was forcing a full itinerary rewrite.
+
+### The other question: is it any good?
+
+All of the above measures whether the agents decide correctly. None of it says whether anyone got a
+trip they wanted, which is a different question and the one that decides what to build next. So every
+run writes a row to `runs`: which agents ran, how long it took, how many model calls it cost, whether
+it delivered a plan, stopped to ask for details, or was turned away — and where the traveller wanted
+to go. No message text; the conversation is already in the checkpoints and this only needs counting.
+
+```bash
+python -m stats               # the last 30 days
+python -m stats --days 7
+```
+
+It prints the funnel — how many first messages become trips, how many stall at the intake questions
+and never come back, how many plans get refined afterwards — plus what a run costs to serve, split by
+how it ended. A refusal costs one model call and about 2 seconds; a full plan costs six and about 20.
+
+Recording can't break a plan: the write is wrapped, and a failure is logged and dropped. Development
+traffic counts too, so clear the table (`DELETE FROM runs`) before the numbers are meant to mean
+anything.
 
 ---
 
@@ -342,8 +378,10 @@ backend/
   custom_weather_mcp.py a FastMCP server exposing the weather tool
   auth.py               password hashing and the login token
   chats.py              who owns which chat
-  db.py                 the Postgres pool, and the users and chats tables
+  db.py                 the Postgres pool, and the users, chats and runs tables
   place_preview.py      cached Tavily REST search for previews and hotels
+  runs.py               one row per run of the graph, for the product numbers
+  stats.py              reads those rows: the funnel, what a run costs, where people go
   tools/flight_tool.py  AviationStack flight lookup
   tools/weather_tool.py OpenWeather current conditions and forecast
   evals/                datasets, scorers and the runner; wiring.py fakes every API
