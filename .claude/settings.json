@@ -90,7 +90,8 @@
       "Bash(kill 58054)",
       "Bash(lsof -ti:8000 -sTCP:LISTEN)",
       "Bash(perl -e 'select undef,undef,undef,0.5')",
-      "Bash(ps -p 58054 -o pid=)"
+      "Bash(ps -p 58054 -o pid=)",
+      "Bash(grep -oE '\"[a-z_ ]{6,40}\"' stats.py)"
     ]
   }
 }

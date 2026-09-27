@@ -232,6 +232,23 @@ because we wrote the fakes. It checks our parsing against recorded real response
 the API whether those recordings still hold. It exists because a change that made Tavily answer in a
 different shape passed every other check while quietly returning no photo at all.
 
+### The frontend
+
+```bash
+cd frontend
+npm test           # once
+npm run test:watch
+```
+
+57 tests over the parts where being wrong is quiet rather than loud: the SSE reader that has to
+survive an event split across two network chunks, the progress checklist's reducer, the thread store's
+guest-versus-account rules and the claim-on-login handover, the login dialog, and which cards a reply
+renders — the last of these being what keeps a hotels-only answer from growing a day-by-day plan.
+
+They run in about a second with no server and no API keys, because everything past the component is
+mocked at the network boundary. `npx tsc --noEmit` type-checks them along with the app, which is worth
+doing: it caught three wrong fixtures in these tests that still passed at runtime.
+
 Where it stands, at the latest run of each set, over two repetitions:
 
 ```
@@ -400,6 +417,7 @@ backend/
   evals/                datasets, scorers and the runner; wiring.py fakes every API
 frontend/src/
   components/           chat UI: the plan cards, composer, sidebar, login dialog, link sheet
+  **/*.test.tsx         Vitest + React Testing Library, beside what they test
   lib/api.ts            typed client for the backend, and the SSE reader
   lib/threads.ts        the chat list, from the server, via useSyncExternalStore
   lib/activeThread.ts   which chat is open, kept in the URL as ?thread=
