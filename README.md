@@ -249,6 +249,25 @@ They run in about a second with no server and no API keys, because everything pa
 mocked at the network boundary. `npx tsc --noEmit` type-checks them along with the app, which is worth
 doing: it caught three wrong fixtures in these tests that still passed at runtime.
 
+```bash
+npm run test:e2e                          # 12 journeys, headless
+npm run test:e2e:ui                       # watch them run, and step back through any action
+SLOW_MO=600 npm run test:e2e:headed       # a real browser window, slow enough to follow
+npm run test:e2e:debug                    # pause on each action, with the inspector
+```
+
+The end-to-end tests drive the **real Next.js server** — its route handlers, the httpOnly login cookie
+and the SSE pass-through are all the production ones — with only the Python service behind it swapped
+for `e2e/stub-backend.mjs`. That is the seam worth mocking at: the browser and the whole BFF layer are
+genuinely exercised, while a plan that takes 25 seconds for real finishes in a few hundred
+milliseconds, costs nothing and answers the same way every time. Playwright starts both servers
+itself, so `npm run test:e2e` needs nothing running.
+
+They cover the journeys no unit test reaches: a guest's trip following them into the account they sign
+up for, logging out and back in, the same account's trips appearing in a second browser, the intake
+card surviving a refresh mid-question, the progress checklist ticking through the agents, and a
+hotels-only follow-up rendering hotels with no day-by-day plan under it.
+
 Where it stands, at the latest run of each set, over two repetitions:
 
 ```
@@ -418,6 +437,7 @@ backend/
 frontend/src/
   components/           chat UI: the plan cards, composer, sidebar, login dialog, link sheet
   **/*.test.tsx         Vitest + React Testing Library, beside what they test
+frontend/e2e/           Playwright journeys, with a stub standing in for FastAPI
   lib/api.ts            typed client for the backend, and the SSE reader
   lib/threads.ts        the chat list, from the server, via useSyncExternalStore
   lib/activeThread.ts   which chat is open, kept in the URL as ?thread=
