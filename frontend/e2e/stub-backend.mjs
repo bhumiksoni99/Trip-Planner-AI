@@ -188,6 +188,21 @@ const server = createServer(async (request, response) => {
 
   if (path === "/api/auth/me") {
     if (!account) return json(response, 401, { detail: "Not signed in." });
+
+    if (request.method === "DELETE") {
+      // The real backend forgets each thread's checkpoints before dropping the account, since no
+      // foreign key reaches them. Here that is just removing the chats this user owns
+      let threads = 0;
+      for (const [id, chat] of chats) {
+        if (chat.userId === account.id) {
+          chats.delete(id);
+          threads += 1;
+        }
+      }
+      users.delete(account.email);
+      return ok(response, { deleted: true, threads });
+    }
+
     return ok(response, { id: account.id, email: account.email });
   }
 

@@ -56,6 +56,12 @@ def delete(thread_id: str, user_id: str) -> bool:
     return db.execute("DELETE FROM chats WHERE thread_id = %s AND user_id = %s", (thread_id, user_id)) > 0
 
 
+def thread_ids_for(user_id: str) -> list[str]:
+    """Every chat this user owns. Deleting the account has to forget each one's checkpoints too:
+    the conversation lives there, so dropping the rows alone would leave it behind for good."""
+    return [row["thread_id"] for row in db.fetch("SELECT thread_id FROM chats WHERE user_id = %s", (user_id,))]
+
+
 def claim(thread_ids: list[str], user_id: str, title_for) -> list[str]:
     """Hand a guest's chats to the account they just logged into.
 

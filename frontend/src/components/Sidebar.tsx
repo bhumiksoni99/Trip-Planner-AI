@@ -12,6 +12,7 @@ type SidebarProps = {
   account: Account | null;
   onLogin: () => void;
   onLogout: () => void;
+  onDeleteAccount: () => void;
   onSelect: (threadId: string) => void;
   onNewChat: () => void;
   onDelete: (threadId: string) => void;
@@ -28,6 +29,7 @@ export default function Sidebar({
   account,
   onLogin,
   onLogout,
+  onDeleteAccount,
   onSelect,
   onNewChat,
   onDelete,
@@ -116,12 +118,17 @@ export default function Sidebar({
 
         <div className="border-t border-sidebar-hover px-5 py-4">
           {account ? (
-            <div className="flex items-center justify-between gap-2">
-              <span className="min-w-0 truncate text-xs text-sidebar-ink" title={account.email}>
-                {account.email}
-              </span>
-              <button type="button" onClick={onLogout} className="shrink-0 text-xs text-faint underline underline-offset-2 hover:text-sidebar-ink">
-                Log out
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="min-w-0 truncate text-xs text-sidebar-ink" title={account.email}>
+                  {account.email}
+                </span>
+                <button type="button" onClick={onLogout} className="shrink-0 text-xs text-faint underline underline-offset-2 hover:text-sidebar-ink">
+                  Log out
+                </button>
+              </div>
+              <button type="button" onClick={onDeleteAccount} className="text-[11px] text-faint underline underline-offset-2 hover:text-sidebar-ink">
+                Delete account
               </button>
             </div>
           ) : (

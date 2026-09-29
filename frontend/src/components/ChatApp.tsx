@@ -31,6 +31,7 @@ import {
   useThreads,
 } from "@/lib/threads";
 import AccountDialog from "./AccountDialog";
+import DeleteAccountDialog from "./DeleteAccountDialog";
 import { applyProgress, emptyProgress, type ProgressState } from "./AgentProgress";
 import Composer, { type ComposerHandle } from "./Composer";
 import EmptyState from "./EmptyState";
@@ -68,6 +69,7 @@ export default function ChatApp({ account: signedInOnLoad }: { account: Account 
   // The composer keeps its own draft, so typing doesn't re-render the conversation
   const composerRef = useRef<ComposerHandle>(null);
   const [accountOpen, setAccountOpen] = useState(false);
+  const [deleteAccountOpen, setDeleteAccountOpen] = useState(false);
 
   // The store lists the account's chats when logged in, and this browser's when not
   useEffect(() => {
@@ -243,6 +245,15 @@ export default function ChatApp({ account: signedInOnLoad }: { account: Account 
     router.refresh();
   }
 
+  // The account and its trips are gone, so drop back to being a guest with an empty sidebar
+  function accountDeleted() {
+    setDeleteAccountOpen(false);
+    setActiveThreadId(null);
+    setPauses({});
+    setSession(null);
+    router.refresh();
+  }
+
   function downloadPdf(content: string, days?: PlanDay[], hotels?: PlanHotel[], brief?: BriefTerm[], header?: PlanHeader | null, costs?: PlanCosts | null) {
     // Render only this reply into the print view, then open the print dialog ("Save as PDF")
     flushSync(() => setPrintContent({ content, days, hotels, brief, header, costs }));
@@ -264,6 +275,7 @@ export default function ChatApp({ account: signedInOnLoad }: { account: Account 
           account={account}
           onLogin={() => setAccountOpen(true)}
           onLogout={signOut}
+          onDeleteAccount={() => setDeleteAccountOpen(true)}
           onSelect={selectThread}
           onNewChat={startNewChat}
           onDelete={removeThread}
@@ -333,6 +345,9 @@ export default function ChatApp({ account: signedInOnLoad }: { account: Account 
 
         {openLink && <LinkPanel key={openLink.href} link={openLink} onClose={() => setOpenLink(null)} />}
         {accountOpen && <AccountDialog onClose={() => setAccountOpen(false)} onSignedIn={signedIn} />}
+        {deleteAccountOpen && account && (
+          <DeleteAccountDialog email={account.email} onClose={() => setDeleteAccountOpen(false)} onDeleted={accountDeleted} />
+        )}
       </div>
 
       {printContent && (

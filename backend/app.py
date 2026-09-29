@@ -4,6 +4,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 import json
+import logging
 import queue
 import re
 import threading
@@ -41,10 +42,21 @@ app = FastAPI(title="Travel Agent",description="Langgraph FastAPI app", version=
 
 load_dotenv()
 
+# agent.py configures the root logger, so this picks up LOG_LEVEL with it
+logger = logging.getLogger("travel.app")
+
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 # The browser makes these: 32 hex characters. Anything else never reached a chat, so it's rejected here
 ThreadId = Annotated[str, Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")]
+
+# Everything a traveller types reaches a model prompt, so it is capped before it gets there. A trip
+# request is a sentence or two and feedback is a line; these are generous for both, and far short of
+# what it would take to run up a bill or push the real instructions out of a prompt
+Message = Annotated[str, Field(max_length=2000)]
+IntakeKey = Annotated[str, Field(max_length=64)]
+IntakeAnswer = Annotated[str, Field(max_length=500)]
+PlaceQuery = Annotated[str, Field(max_length=200)]
 
 
 class ClaimRequest(BaseModel):
@@ -110,16 +122,52 @@ def login(request: LoginRequest):
 def me(user: dict = Depends(current_user)):
     return {"success": True, "data": user}
 
+
+@app.delete('/api/auth/me')
+def delete_account(user: dict = Depends(current_user)):
+    """Close an account and take its conversations with it.
+
+    The chats rows go when the user row does, through the foreign key. The conversations themselves
+    don't: they are LangGraph checkpoints keyed by thread_id, which no cascade reaches. So every
+    thread is forgotten first, and only then is the account removed — the other order would drop the
+    rows that say which threads were this person's and leave the messages behind for good.
+
+    What survives is the runs table, whose user_id becomes null: how long a run took and how many
+    model calls it made, with nothing left tying it to anybody."""
+    threads = chats.thread_ids_for(user["id"])
+    forgotten = 0
+
+    for thread_id in threads:
+        try:
+            forget_thread(thread_id)
+            forgotten += 1
+        except Exception:
+            # Carry on: one thread refusing to go mustn't strand the other forty
+            traceback.print_exc()
+
+    if forgotten < len(threads):
+        # The account stays, so the traveller can ask again rather than being left half-deleted
+        return JSONResponse(status_code=500, content={
+            "success": False,
+            "error": "Couldn't delete all of your trips, so your account is untouched. Please try again.",
+        })
+
+    db.execute("DELETE FROM users WHERE id = %s", (user["id"],))
+    logger.info("account deleted | user=%s threads=%s", user["id"], forgotten)
+
+    return {"success": True, "data": {"deleted": True, "threads": forgotten}}
+
 class TravelRequest(BaseModel):
-    message:str
-    thread_id: str | None = None
+    message: Message
+    thread_id: ThreadId | None = None
 
 class ResumeRequest(BaseModel):
     """Answers whatever the run paused on: the intake questions, or the approval question."""
-    thread_id: str
+    thread_id: ThreadId
     approved: bool | None = None
-    feedback: str = ""
-    answers: dict[str, str] | None = None
+    feedback: Message = ""
+    # One answer per intake question, and intake never asks more than a handful
+    answers: dict[IntakeKey, IntakeAnswer] | None = Field(default=None, max_length=20)
     skipped: bool = False
 
 @app.get('/health')
@@ -364,7 +412,7 @@ def claim_chats(request: ClaimRequest, user: dict = Depends(current_user)):
 
 
 @app.get('/api/place')
-def place_preview(q: str):
+def place_preview(q: PlaceQuery):
     """Photos and links for a place, shown in the app instead of sending the traveller to Google.
 
     Plain def, not async def, so FastAPI runs the search in a worker thread and one

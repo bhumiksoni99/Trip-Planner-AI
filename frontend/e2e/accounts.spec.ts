@@ -119,3 +119,37 @@ test("a signed-in trip and its cards come back after a reload", async ({ page })
   await expect(cards.hotels(page)).toBeVisible();
   await expect(cards.days(page)).toBeVisible();
 });
+
+test("closing an account takes its trips with it, and needs the email typed to do so", async ({ page }) => {
+  const email = anEmail();
+  await page.goto("/");
+  await sidebar.loginButton(page).click();
+  await signUp(page, email);
+
+  await ask(page, "Plan a 5 day trip to Tokyo from Delhi in May");
+  await waitForPlan(page);
+  await expect(sidebar.chat(page, "Plan a 5 day trip to Tokyo from Delhi in May")).toBeVisible();
+
+  await page.getByRole("button", { name: "Delete account" }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toContainText("It can't be undone.");
+
+  // Nothing happens until the address is typed, so this can't be done by a stray click
+  const remove = dialog.getByRole("button", { name: "Delete everything" });
+  await expect(remove).toBeDisabled();
+  await dialog.getByLabel(/Type/).fill("not-my-email@example.com");
+  await expect(remove).toBeDisabled();
+
+  await dialog.getByLabel(/Type/).fill(email);
+  await expect(remove).toBeEnabled();
+  await remove.click();
+
+  // Back to being a guest, with nothing left in the sidebar
+  await expect(sidebar.loginButton(page)).toBeVisible();
+  await expect(sidebar.chat(page, "Plan a 5 day trip to Tokyo from Delhi in May")).toHaveCount(0);
+
+  // And the account is really gone: the old password no longer signs anyone in
+  await sidebar.loginButton(page).click();
+  await logIn(page, email);
+  await expect(page.getByRole("dialog").getByRole("alert")).toContainText("Wrong email or password.");
+});

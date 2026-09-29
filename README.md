@@ -139,6 +139,19 @@ own cards, because the state itself only ever holds the newest plan's cards, so 
 chat would otherwise take the first one's. And the agents' own notes to each other ("Weather Fetched")
 are filtered out.
 
+**Deleting an account has to reach past the foreign keys.** The `chats` rows go when the user row
+does, through `ON DELETE CASCADE`. The conversations don't: they are LangGraph checkpoints keyed by
+`thread_id`, which no cascade reaches, so a plain cascade would drop the only rows that said which
+threads were that person's and leave every message behind for good. `DELETE /api/auth/me` forgets each
+thread first and removes the account only once they are all gone, so a failure halfway leaves the
+account intact rather than half-deleted. What survives is the `runs` row, with its `user_id` set to
+null: how long a run took and what it cost, with nothing left tying it to anybody.
+
+**Everything a traveller types is capped before it reaches a prompt.** A trip request and a line of
+feedback are limited to 2,000 characters, an intake answer to 500, and a place lookup to 200. The
+message field is the one that reaches every model call, so an uncapped one is both a bill and a way to
+push the real instructions out of a prompt.
+
 **Guests don't need an account.** A guest's chats sit in the database with no owner; their browser only
 remembers the ids. Logging in claims those ids, which skips over any that already belong to someone else,
 so a stray id can't take another person's chat. Someone else's chat answers 404, never 403, so the reply
@@ -391,6 +404,7 @@ experiments to.
 | `POST /api/auth/signup` | Create an account; returns a login token |
 | `POST /api/auth/login` | Log in; returns a login token |
 | `GET /api/auth/me` | The account a token belongs to |
+| `DELETE /api/auth/me` | Close an account, deleting every trip on it and the conversations behind them |
 | `GET /api/chats` | The logged-in traveller's chats, newest first |
 | `GET /api/chats/{thread_id}` | One chat, rebuilt from its checkpoint, with any question it's paused on |
 | `DELETE /api/chats/{thread_id}` | Delete a chat and its checkpoints |

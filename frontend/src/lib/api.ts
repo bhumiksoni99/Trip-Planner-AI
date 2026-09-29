@@ -264,6 +264,11 @@ export function logout(): Promise<void> {
   return send<void>("/api/auth/logout", { method: "POST" });
 }
 
+/** Closes the account and deletes every trip on it, conversations included. There is no undo. */
+export function deleteAccount(): Promise<{ deleted: boolean; threads: number }> {
+  return send<{ deleted: boolean; threads: number }>("/api/auth/me", { method: "DELETE" });
+}
+
 export function listChats(): Promise<ChatSummary[]> {
   return send<ChatSummary[]>("/api/chats");
 }
