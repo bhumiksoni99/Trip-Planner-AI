@@ -39,9 +39,24 @@ def verify_password(password: str, password_hash: str | None) -> bool:
     return password_hasher.verify(password, password_hash or UNKNOWN_USER_HASH) and password_hash is not None
 
 
-def create_token(user_id: str) -> str:
+def create_token(user_id: str, token_version: int = 0) -> str:
+    """A token is only good while it carries the account's current version, so raising that version
+    ends every session at once — the nearest a stateless JWT gets to being taken back."""
     now = datetime.now(timezone.utc)
-    return jwt.encode({"sub": user_id, "iat": now, "exp": now + TOKEN_LIFETIME}, JWT_SECRET, algorithm="HS256")
+    return jwt.encode(
+        {"sub": user_id, "tv": token_version, "iat": now, "exp": now + TOKEN_LIFETIME},
+        JWT_SECRET,
+        algorithm="HS256",
+    )
+
+
+def revoke_tokens(user_id: str) -> int:
+    """Ends every session this account has. Returns the version now required."""
+    rows = db.fetch(
+        "UPDATE users SET token_version = token_version + 1 WHERE id = %s RETURNING token_version",
+        (user_id,),
+    )
+    return rows[0]["token_version"] if rows else 0
 
 
 def user_from_header(authorization: str | None) -> dict | None:
@@ -54,16 +69,25 @@ def user_from_header(authorization: str | None) -> dict | None:
         raise HTTPException(401, "Please log in again.")
 
     try:
-        claims = jwt.decode(token, JWT_SECRET, algorithms=["HS256"], options={"require": ["exp", "sub"]})
+        # tv is required, so a token issued before versioning existed is treated as expired rather
+        # than trusted forever
+        claims = jwt.decode(token, JWT_SECRET, algorithms=["HS256"], options={"require": ["exp", "sub", "tv"]})
         user_id = str(uuid.UUID(claims["sub"]))
     except (jwt.InvalidTokenError, ValueError):
         raise HTTPException(401, "Your session has expired. Please log in again.")
 
-    rows = db.fetch("SELECT id::text AS id, email FROM users WHERE id = %s", (user_id,))
+    # This lookup already had to happen to know the account still exists, so checking the version
+    # costs nothing beyond one more column
+    rows = db.fetch("SELECT id::text AS id, email, token_version FROM users WHERE id = %s", (user_id,))
     if not rows:
         # A valid token for an account that has since been deleted
         raise HTTPException(401, "Please log in again.")
-    return rows[0]
+
+    user = rows[0]
+    if claims.get("tv") != user["token_version"]:
+        raise HTTPException(401, "You've been signed out. Please log in again.")
+
+    return {"id": user["id"], "email": user["email"]}
 
 
 def current_user(authorization: str | None = Header(default=None)) -> dict:

@@ -269,6 +269,11 @@ export function deleteAccount(): Promise<{ deleted: boolean; threads: number }> 
   return send<{ deleted: boolean; threads: number }>("/api/auth/me", { method: "DELETE" });
 }
 
+/** Signs out every other device. This browser stays logged in, on a freshly issued token. */
+export function logoutEverywhere(): Promise<Account> {
+  return send<Account>("/api/auth/logout-all", { method: "POST" });
+}
+
 export function listChats(): Promise<ChatSummary[]> {
   return send<ChatSummary[]>("/api/chats");
 }

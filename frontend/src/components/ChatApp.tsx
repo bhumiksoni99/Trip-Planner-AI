@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { flushSync } from "react-dom";
 import {
   logout,
+  logoutEverywhere,
   requestPlan,
   resumePlan,
   type Account,
@@ -245,6 +246,19 @@ export default function ChatApp({ account: signedInOnLoad }: { account: Account 
     router.refresh();
   }
 
+  // Ends every other session. This browser keeps going on the token the backend hands back, so the
+  // traveller doesn't sign themselves out while locking someone else out
+  async function signOutEverywhere() {
+    if (!window.confirm("Sign out of every other device? You'll stay signed in here.")) return;
+
+    try {
+      await logoutEverywhere();
+      window.alert("Your other devices have been signed out.");
+    } catch {
+      window.alert("Couldn't sign out your other devices. Please try again.");
+    }
+  }
+
   // The account and its trips are gone, so drop back to being a guest with an empty sidebar
   function accountDeleted() {
     setDeleteAccountOpen(false);
@@ -275,6 +289,7 @@ export default function ChatApp({ account: signedInOnLoad }: { account: Account 
           account={account}
           onLogin={() => setAccountOpen(true)}
           onLogout={signOut}
+          onLogoutEverywhere={signOutEverywhere}
           onDeleteAccount={() => setDeleteAccountOpen(true)}
           onSelect={selectThread}
           onNewChat={startNewChat}

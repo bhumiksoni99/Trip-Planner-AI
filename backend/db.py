@@ -45,9 +45,14 @@ TABLES = [
         id            uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
         email         text        NOT NULL UNIQUE,
         password_hash text        NOT NULL,
-        created_at    timestamptz NOT NULL DEFAULT now()
+        created_at    timestamptz NOT NULL DEFAULT now(),
+        -- Every token carries the value this had when it was issued, so raising it by one turns all
+        -- of that account's tokens into expired ones at once. A JWT can't be taken back otherwise
+        token_version int         NOT NULL DEFAULT 0
     )
     """,
+    # For accounts that existed before tokens could be revoked
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version int NOT NULL DEFAULT 0",
     """
     CREATE TABLE IF NOT EXISTS chats (
         thread_id  text        PRIMARY KEY,

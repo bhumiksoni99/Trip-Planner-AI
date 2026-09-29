@@ -12,6 +12,7 @@ type SidebarProps = {
   account: Account | null;
   onLogin: () => void;
   onLogout: () => void;
+  onLogoutEverywhere: () => void;
   onDeleteAccount: () => void;
   onSelect: (threadId: string) => void;
   onNewChat: () => void;
@@ -29,6 +30,7 @@ export default function Sidebar({
   account,
   onLogin,
   onLogout,
+  onLogoutEverywhere,
   onDeleteAccount,
   onSelect,
   onNewChat,
@@ -127,9 +129,14 @@ export default function Sidebar({
                   Log out
                 </button>
               </div>
-              <button type="button" onClick={onDeleteAccount} className="text-[11px] text-faint underline underline-offset-2 hover:text-sidebar-ink">
-                Delete account
-              </button>
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                <button type="button" onClick={onLogoutEverywhere} className="text-[11px] text-faint underline underline-offset-2 hover:text-sidebar-ink">
+                  Sign out other devices
+                </button>
+                <button type="button" onClick={onDeleteAccount} className="text-[11px] text-faint underline underline-offset-2 hover:text-sidebar-ink">
+                  Delete account
+                </button>
+              </div>
             </div>
           ) : (
             <div className="space-y-1.5">

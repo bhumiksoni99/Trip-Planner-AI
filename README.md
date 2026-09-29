@@ -139,6 +139,23 @@ own cards, because the state itself only ever holds the newest plan's cards, so 
 chat would otherwise take the first one's. And the agents' own notes to each other ("Weather Fetched")
 are filtered out.
 
+**A JWT can't be called back, so the account carries a version.** Every token holds the account's
+`token_version` from when it was issued, and `user_from_header` already had to look the user up to
+know they still exist — so checking that number costs one more column and nothing else. Raising it by
+one turns every token for that account into an expired one at once, which is what a stolen token or a
+changed password needs. `POST /api/auth/logout-all` does that and hands the caller a fresh token, so
+locking everyone else out doesn't lock you out too. The `tv` claim is required, so a token minted
+before any of this existed is treated as expired rather than trusted forever.
+
+**Rate limits are counted in this process's memory.** One uvicorn process and no Redis, so that is the
+honest size for them — and worth saying plainly: the counts reset when the process restarts, and a
+second instance would keep its own. Logging in is limited per address *and* per email, because one
+address working through many accounts and many addresses working through one account are different
+attacks and neither limit catches both. Planning is counted against the account when there is one,
+since an id can't be shared the way an address behind a mobile network can. A refused attempt isn't
+recorded, so hammering the door doesn't push your own unlock further away. Every limit is an
+environment variable, and moving them to Redis is a change to one function.
+
 **Deleting an account has to reach past the foreign keys.** The `chats` rows go when the user row
 does, through `ON DELETE CASCADE`. The conversations don't: they are LangGraph checkpoints keyed by
 `thread_id`, which no cascade reaches, so a plain cascade would drop the only rows that said which
@@ -379,6 +396,10 @@ All of it comes from a `.env` at the repo root.
 | `POSTGRES_DB` | yes | Connection string for the checkpoints, and for the accounts and chats tables |
 | `JWT_SECRET` | yes | Signs login tokens; at least 32 characters |
 | `DB_POOL_SIZE` | no | Database connections to keep, default `4` |
+| `RATE_LOGIN_PER_IP` | no | Login attempts per address per 15 min, default `10` |
+| `RATE_LOGIN_PER_EMAIL` | no | Login attempts per account per 15 min, default `5` |
+| `RATE_PLANS` | no | Plans per traveller per hour, default `30` |
+| `RATE_PREVIEWS` | no | Place lookups per traveller per minute, default `60` |
 | `GEMINI_TIMEOUT_SECONDS` | no | How long a model call may hang before it errors, default `60` |
 | `DEFAULT_ORIGIN` | no | Fallback departure airport, default `DEL` |
 | `DEFAULT_ORIGIN_CITY` | no | Fallback departure city, shown in intake options |
@@ -404,6 +425,7 @@ experiments to.
 | `POST /api/auth/signup` | Create an account; returns a login token |
 | `POST /api/auth/login` | Log in; returns a login token |
 | `GET /api/auth/me` | The account a token belongs to |
+| `POST /api/auth/logout-all` | End every session on the account; returns a fresh token for the caller |
 | `DELETE /api/auth/me` | Close an account, deleting every trip on it and the conversations behind them |
 | `GET /api/chats` | The logged-in traveller's chats, newest first |
 | `GET /api/chats/{thread_id}` | One chat, rebuilt from its checkpoint, with any question it's paused on |
@@ -439,7 +461,8 @@ backend/
   app.py                FastAPI endpoints, including the SSE streams
   mcp_client.py         MCP clients for Tavily and the weather server (not on the request path)
   custom_weather_mcp.py a FastMCP server exposing the weather tool
-  auth.py               password hashing and the login token
+  auth.py               password hashing, the login token, and taking it back
+  limits.py             how often one caller may log in, plan or look a place up
   chats.py              who owns which chat
   db.py                 the Postgres pool, and the users, chats and runs tables
   place_preview.py      cached Tavily REST search for previews and hotels

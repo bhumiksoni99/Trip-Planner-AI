@@ -16,6 +16,7 @@ from typing import Annotated
 from uuid import uuid4
 import chats
 import db
+import limits
 import runs
 from agent import (
     chat_messages,
@@ -27,7 +28,7 @@ from agent import (
     stream_resume_travel_agent,
     title_of,
 )
-from auth import create_token, current_user, hash_password, optional_user, verify_password
+from auth import create_token, current_user, hash_password, optional_user, revoke_tokens, verify_password
 from place_preview import search_place
 
 
@@ -44,6 +45,8 @@ load_dotenv()
 
 # agent.py configures the root logger, so this picks up LOG_LEVEL with it
 logger = logging.getLogger("travel.app")
+
+PLAN_LIMIT_MESSAGE = "You've planned a lot of trips just now. Please wait a little before the next one."
 
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
@@ -82,19 +85,23 @@ class LoginRequest(BaseModel):
 
 def account(user: dict) -> dict:
     """What the frontend gets back after signing up or logging in"""
-    return {"success": True, "data": {"token": create_token(user["id"]), "user": {"id": user["id"], "email": user["email"]}}}
+    token = create_token(user["id"], user.get("token_version", 0))
+    return {"success": True, "data": {"token": token, "user": {"id": user["id"], "email": user["email"]}}}
 
 
 @app.post('/api/auth/signup')
-def signup(request: SignupRequest):
+def signup(request: SignupRequest, http: Request):
     """Plain def, so FastAPI runs the password hashing and the database write in a worker thread"""
     email = request.email.strip().lower()
     if not EMAIL_PATTERN.match(email):
         raise HTTPException(400, "That doesn't look like an email address.")
 
+    limits.enforce(f"signup:{limits.client_ip(http)}", limits.LOGIN_PER_IP,
+                   "Too many accounts from this address. Please wait a few minutes.")
+
     try:
         user = db.fetch(
-            "INSERT INTO users (email, password_hash) VALUES (%s, %s) RETURNING id::text AS id, email",
+            "INSERT INTO users (email, password_hash) VALUES (%s, %s) RETURNING id::text AS id, email, token_version",
             (email, hash_password(request.password)),
         )[0]
     except psycopg.errors.UniqueViolation:
@@ -104,10 +111,19 @@ def signup(request: SignupRequest):
 
 
 @app.post('/api/auth/login')
-def login(request: LoginRequest):
+def login(request: LoginRequest, http: Request):
+    email = request.email.strip().lower()
+
+    # Per address stops one machine working through many accounts; per email stops many machines
+    # working through one. Both are needed, and neither is enough alone
+    limits.enforce(f"login-ip:{limits.client_ip(http)}", limits.LOGIN_PER_IP,
+                   "Too many attempts from this address. Please wait a few minutes.")
+    limits.enforce(f"login-email:{email}", limits.LOGIN_PER_EMAIL,
+                   "Too many attempts for this account. Please wait a few minutes.")
+
     rows = db.fetch(
-        "SELECT id::text AS id, email, password_hash FROM users WHERE email = %s",
-        (request.email.strip().lower(),),
+        "SELECT id::text AS id, email, password_hash, token_version FROM users WHERE email = %s",
+        (email,),
     )
     user = rows[0] if rows else None
 
@@ -121,6 +137,20 @@ def login(request: LoginRequest):
 @app.get('/api/auth/me')
 def me(user: dict = Depends(current_user)):
     return {"success": True, "data": user}
+
+
+@app.post('/api/auth/logout-all')
+def logout_everywhere(user: dict = Depends(current_user)):
+    """Ends every session this account has, on every device, including the one asking.
+
+    This is what a stolen token needs: a JWT can't be called back, so the account's token version is
+    raised instead and every token issued against the old one stops being accepted."""
+    version = revoke_tokens(user["id"])
+    logger.info("sessions revoked | user=%s version=%s", user["id"], version)
+
+    # A fresh token for whoever asked, so they aren't signed out of the device they're holding
+    return {"success": True, "data": {"token": create_token(user["id"], version),
+                                      "user": {"id": user["id"], "email": user["email"]}}}
 
 
 @app.delete('/api/auth/me')
@@ -178,7 +208,7 @@ async def health_check():
     })
 
 @app.post('/api/travel')
-def get_itinerary(request: TravelRequest, user: dict | None = Depends(optional_user)):
+def get_itinerary(request: TravelRequest, http: Request, user: dict | None = Depends(optional_user)):
     """Plan a trip and wait for the whole plan. The UI uses the streaming route; this one is for curl.
 
     Plain def, so the planning run happens in a worker thread rather than on the event loop."""
@@ -189,6 +219,8 @@ def get_itinerary(request: TravelRequest, user: dict | None = Depends(optional_u
             "success": False,
             "error": "Message cannot be empty"
         })
+
+    limits.enforce(f"plan:{limits.caller(http, user)}", limits.PLANS, PLAN_LIMIT_MESSAGE)
 
     thread_id = request.thread_id or uuid4().hex
     check_readable(thread_id, user)  # outside the catch below, so a 404 stays a 404
@@ -225,8 +257,9 @@ def resume_value_of(request: ResumeRequest):
 
 
 @app.post('/api/travel/resume')
-def resume_itinerary(request: ResumeRequest, user: dict | None = Depends(optional_user)):
+def resume_itinerary(request: ResumeRequest, http: Request, user: dict | None = Depends(optional_user)):
     """Answer the question a paused run is waiting on, and carry on planning."""
+    limits.enforce(f"plan:{limits.caller(http, user)}", limits.PLANS, PLAN_LIMIT_MESSAGE)
     check_readable(request.thread_id, user)
 
     if user:
@@ -325,7 +358,7 @@ def sse(events):
 
 
 @app.post('/api/travel/stream')
-def stream_itinerary(request: TravelRequest, user: dict | None = Depends(optional_user)):
+def stream_itinerary(request: TravelRequest, http: Request, user: dict | None = Depends(optional_user)):
     """Plan a trip, reporting each agent as it starts and finishes; ends with the plan or a pause.
 
     Plain def, so the ownership check runs in a worker thread rather than on the event loop."""
@@ -336,6 +369,8 @@ def stream_itinerary(request: TravelRequest, user: dict | None = Depends(optiona
             "success": False,
             "error": "Message cannot be empty"
         })
+
+    limits.enforce(f"plan:{limits.caller(http, user)}", limits.PLANS, PLAN_LIMIT_MESSAGE)
 
     thread_id = request.thread_id or uuid4().hex
     check_readable(thread_id, user)
@@ -352,8 +387,9 @@ def stream_itinerary(request: TravelRequest, user: dict | None = Depends(optiona
 
 
 @app.post('/api/travel/resume/stream')
-def stream_resume_itinerary(request: ResumeRequest, user: dict | None = Depends(optional_user)):
+def stream_resume_itinerary(request: ResumeRequest, http: Request, user: dict | None = Depends(optional_user)):
     """Answer what a paused run is waiting on, reporting progress for the agents that run next."""
+    limits.enforce(f"plan:{limits.caller(http, user)}", limits.PLANS, PLAN_LIMIT_MESSAGE)
     check_readable(request.thread_id, user)
 
     if user:
@@ -412,12 +448,15 @@ def claim_chats(request: ClaimRequest, user: dict = Depends(current_user)):
 
 
 @app.get('/api/place')
-def place_preview(q: PlaceQuery):
+def place_preview(q: PlaceQuery, http: Request, user: dict | None = Depends(optional_user)):
     """Photos and links for a place, shown in the app instead of sending the traveller to Google.
 
     Plain def, not async def, so FastAPI runs the search in a worker thread and one
     slow lookup can't block everything else the server is doing.
     """
+    limits.enforce(f"place:{limits.caller(http, user)}", limits.PREVIEWS,
+                   "Too many lookups just now. Please wait a moment.")
+
     try:
         query = q.strip()
         if not query:
