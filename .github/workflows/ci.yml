@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+# A newer push supersedes the run before it, so a run of commits doesn't queue a run of jobs
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  eslint:
+    name: eslint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          # The LTS line, which is what Vercel builds on; local development is on the newer one
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # ci, not install: it installs exactly what the lockfile says and fails if the two disagree
+      - run: npm ci
+
+      # A warning left in CI is a warning nobody reads, so they fail here like errors do
+      - run: npx eslint . --max-warnings=0
+
+  vitest:
+    name: vitest
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+
+      - run: npm test
+
+  deploy-frontend:
+    name: deploy frontend
+    needs: [eslint, vitest]
+    # Only what lands on main, and only a real push: a pull request builds nothing
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      # Vercel would otherwise deploy on its own when the push arrives, which is a race with these
+      # tests rather than a consequence of them. Its Git deploys are off (frontend/vercel.json), so
+      # the frontend ships from here or not at all.
+      #
+      # The backend is not deployed here: these tests are all frontend, so gating Render on them
+      # would stop a working backend over a failing React test. Render keeps deploying on push.
+      - name: Deploy to Vercel
+        env:
+          HOOK: ${{ secrets.VERCEL_DEPLOY_HOOK_URL }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "VERCEL_DEPLOY_HOOK_URL isn't set, so there is nothing to call."
+            exit 0
+          fi
+          curl -fsS -X POST "$HOOK" > /dev/null
+          echo "Asked Vercel to deploy ${GITHUB_SHA::7}."
