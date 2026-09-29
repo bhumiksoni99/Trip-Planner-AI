@@ -293,6 +293,11 @@ genuinely exercised, while a plan that takes 25 seconds for real finishes in a f
 milliseconds, costs nothing and answers the same way every time. Playwright starts both servers
 itself, so `npm run test:e2e` needs nothing running.
 
+One of them crashes the app on purpose — a reply whose day has no items, which `DayPlan` maps over
+without checking — to prove `app/error.tsx` catches it and offers a way out. Writing it found that the
+obvious escape doesn't work: `/` and `/?thread=x` are the same route segment, so navigating leaves the
+boundary mounted with the same unrenderable reply still in memory. It takes a full document load.
+
 They cover the journeys no unit test reaches: a guest's trip following them into the account they sign
 up for, logging out and back in, the same account's trips appearing in a second browser, the intake
 card surviving a refresh mid-question, the progress checklist ticking through the agents, and a
